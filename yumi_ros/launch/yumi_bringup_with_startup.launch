@@ -26,6 +26,28 @@
             output="screen" />
 
 
+      <node pkg="yumi_ros"
+            type="yumi_cartesian_velocity_controller.py"
+            name="yumi_dual_arm_cartesian_velocity_controller"
+            output="screen">
+            <param name="robot_description_param" value="/robot_description" />
+
+            <param name="left_base_link" value="yumi_base_link" />
+            <param name="left_tip_link" value="yumi_link_7_l" />
+
+            <param name="right_base_link" value="yumi_base_link" />
+            <param name="right_tip_link" value="yumi_link_7_r" />
+
+            <param name="left_input_topic" value="/yumi/robl/cartesian_velocity_command" />
+            <param name="right_input_topic" value="/yumi/robr/cartesian_velocity_command" />
+            <param name="output_topic" value="/yumi/joint_group_velocity_command" />
+
+            <param name="publish_rate" value="250.0" />
+            <param name="command_timeout" value="0.2" />
+            <param name="max_joint_velocity" value="0.2" />
+            <param name="damping" value="0.03" />
+      </node>
+
       <!-- robot description -->
 
       <arg name="arms_interface" default="VelocityJointInterface" />
