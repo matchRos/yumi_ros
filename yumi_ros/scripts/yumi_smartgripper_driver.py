@@ -97,6 +97,15 @@ class SmartGripperSide:
         if not ok:
             return False, f"calibrate failed: {text}"
 
+        # publish joint state after startup to ensure correct initial position is known to the system
+        joint_state_msg = JointState()
+        joint_state_msg.header.stamp = rospy.Time.now()
+        joint_state_msg.name = [self.joint_name]
+        joint_state_msg.position = [0.0]
+        joint_state_msg.velocity = [0.0]
+        joint_state_msg.effort = [0.0]
+        self.state_pub.publish(joint_state_msg)
+
         self.ready = True
         rospy.loginfo(f"[gripper_{self.side_name}] ready")
         return True, "ready"
@@ -155,6 +164,9 @@ class SmartGripperSide:
 
 class YumiSmartGripperDriver:
     def __init__(self):
+        self.startup_delay = rospy.get_param("~startup_delay", 1.0)
+        rospy.sleep(self.startup_delay)
+
         rospy.wait_for_service("/yumi/rws/sm_addin/set_sg_command")
         rospy.wait_for_service("/yumi/rws/sm_addin/run_sg_routine")
 

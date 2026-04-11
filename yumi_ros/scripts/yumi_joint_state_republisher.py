@@ -8,8 +8,8 @@ class JointStateRepublisher:
         self.pub = rospy.Publisher("/joint_states", JointState, queue_size=10)
 
         self.latest_arm_state = None
-        self.latest_left_gripper_state = None
-        self.latest_right_gripper_state = None
+        self.latest_left_gripper_state = JointState()  # None
+        self.latest_right_gripper_state = JointState()  # None
 
         rospy.Subscriber(
             "/yumi/egm/joint_states", JointState, self.arm_cb, queue_size=10

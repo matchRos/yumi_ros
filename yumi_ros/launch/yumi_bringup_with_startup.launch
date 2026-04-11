@@ -6,7 +6,6 @@
       <!-- ABB bringup -->
       <include file="$(find abb_robot_bringup_examples)/launch/ex3_rws_and_egm_yumi_robot.launch">
             <arg name="robot_ip" value="$(arg robot_ip)" />
-            <remap from="/joint_states" to="/yumi/egm/joint_states"/>
       </include>
 
 
@@ -52,10 +51,9 @@
 
       <!-- moveit -->
       <include file="$(find yumi_moveit_config)/launch/move_group.launch">
-            <!-- <remap from="/joint_states" to="/yumi/egm/joint_states"/> -->
-            <remap to="/joint_states" from="/yumi/egm/joint_states"/>
       </include>
 
+      <!-- this bridges allows the yumi_cartesian_velocity_controller to execute MoveIt pose goals by converting them to cartesian velocity commands and sending them to the appropriate topics. It also handles goal tolerances and settling time to ensure smooth execution of MoveIt plans. The parameters can be tuned for better performance based on the specific use case and robot configuration. -->
       <node pkg="yumi_ros"
             type="yumi_execute_bridge.py"
             name="yumi_execute_bridge"
@@ -67,6 +65,10 @@
       <param name="goal_settle_time" value="0.3" />
       </node>
 
+      <!-- allows the user to publish desired end-effector poses to specific topics, 
+      and the node will handle the MoveIt planning and execution to reach those poses. 
+      This is useful for testing and for applications where you want to specify target poses directly 
+      without going through the full MoveIt interface.  -->
       <node pkg="yumi_ros"
             type="yumi_moveit_pose_topics.py"
             name="yumi_moveit_pose_topics"
@@ -86,6 +88,13 @@
             <rosparam param="right_facing_down_quat">[1.0, 0.0, 0.0, 0.0]</rosparam>
       </node>
 
+      <!-- gripper drivers -->
+      <node pkg="yumi_ros"
+            type="yumi_smartgripper_driver.py"
+            name="yumi_left_smartgripper_driver"
+            output="screen">
+            <param name="startup_delay" value="10" />
+      </node>
 
       <!-- joint state republisher to convert from /yumi/egm/joint_states to /joint_states for moveit and other nodes that expect the standard topic name -->
       <node pkg="yumi_ros"
@@ -109,7 +118,6 @@
             type="robot_state_publisher"
             name="robot_state_publisher"
             output="screen">
-            <remap from="joint_states" to="/yumi/egm/joint_states" />
       </node>
 
 

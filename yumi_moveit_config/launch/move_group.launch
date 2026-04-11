@@ -8,7 +8,7 @@
 
   <!-- Verbose Mode Option -->
   <arg name="info" default="$(arg debug)" />
-  <arg unless="$(arg info)" name="command_args" value="joint_states:=/yumi/egm/joint_states" />
+  <arg unless="$(arg info)" name="command_args" value="" />
   <arg     if="$(arg info)" name="command_args" value="--debug" />
 
   <!-- move_group settings -->
