@@ -1,0 +1,29 @@
+<launch>
+
+  <!-- 1. YuMi Treiber -->
+  <!-- <include file="$(find abb_robot_bringup_examples)/launch/ex3_rws_and_egm_yumi_robot.launch">
+    <arg name="robot_ip" value="192.168.125.1"/>
+  </include> -->
+
+  <!-- 2. robot_description (wie vorher) -->
+  <param name="robot_description"
+         command="$(find xacro)/xacro $(find yumi_description)/urdf/yumi.urdf.xacro arms_interface:=VelocityJointInterface grippers_interface:=PositionJointInterface yumi_parent:=world" />
+
+  <!-- 3. robot_state_publisher -->
+  <node pkg="robot_state_publisher"
+        type="robot_state_publisher"
+        name="robot_state_publisher">
+    <remap from="joint_states" to="/yumi/egm/joint_states"/>
+  </node>
+
+  <!-- 4. MoveIt -->
+  <include file="$(find yumi_moveit_config)/launch/move_group.launch">
+    <remap from="/joint_states" to="/yumi/egm/joint_states"/>
+  </include>
+
+  <!-- 5. RViz -->
+  <include file="$(find yumi_moveit_config)/launch/moveit_rviz.launch">
+    <remap from="/joint_states" to="/yumi/egm/joint_states"/>
+  </include>
+
+</launch>

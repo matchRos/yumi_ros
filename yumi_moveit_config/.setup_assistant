@@ -1,0 +1,11 @@
+moveit_setup_assistant_config:
+  URDF:
+    package: ""
+    relative_path: /tmp/yumi_moveit.urdf
+    xacro_args: arms_interface:=PositionJointInterface grippers_interface:=PositionJointInterface yumi_parent:=world
+  SRDF:
+    relative_path: config/yumi.srdf
+  CONFIG:
+    author_name: Tobias Recker
+    author_email: TobiasRecker@Berkeley.edu
+    generated_timestamp: 1775872686
