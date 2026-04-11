@@ -25,12 +25,14 @@ class SmartGripperSide:
         self.state_topic = f"/yumi/gripper_{side_name}/joint_states"
         self.open_service = f"/yumi/gripper_{side_name}/open"
         self.close_service = f"/yumi/gripper_{side_name}/close"
+        self.close_and_hold_service = f"/yumi/gripper_{side_name}/close_and_hold"
 
         self.state_pub = rospy.Publisher(self.state_topic, JointState, queue_size=10)
         rospy.Subscriber(self.command_topic, Float64, self.command_cb, queue_size=1)
 
         rospy.Service(self.open_service, Trigger, self.handle_open)
         rospy.Service(self.close_service, Trigger, self.handle_close)
+        rospy.Service(self.close_and_hold_service, Trigger, self.handle_close_and_hold)
 
     def clamp_mm(self, value_mm):
         return max(self.parent.min_pos_mm, min(self.parent.max_pos_mm, float(value_mm)))
@@ -119,6 +121,20 @@ class SmartGripperSide:
     def close(self):
         return self.move_to(self.parent.min_pos_mm)
 
+    def close_and_hold(self):
+        if not self.ready:
+            return False, "gripper not ready"
+
+        rospy.loginfo(f"[gripper_{self.side_name}] close and hold")
+
+        ok, text = self.send(SetSGCommandRequest.SG_COMMAND_GRIP_IN, 0.0)
+        if ok:
+            self.set_last_pos(self.parent.min_pos_mm)
+            self.publish_state()
+            return True, "closed and holding"
+
+        return False, text
+
     def command_cb(self, msg):
         ok, text = self.move_to(msg.data)
         if not ok:
@@ -130,6 +146,10 @@ class SmartGripperSide:
 
     def handle_close(self, _req):
         ok, text = self.close()
+        return TriggerResponse(success=ok, message=text)
+
+    def handle_close_and_hold(self, _req):
+        ok, text = self.close_and_hold()
         return TriggerResponse(success=ok, message=text)
 
 
