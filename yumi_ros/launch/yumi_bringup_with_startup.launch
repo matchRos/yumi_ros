@@ -27,7 +27,6 @@
 
 
       <!-- robot description -->
-      <group ns="yumi">
 
       <arg name="arms_interface" default="VelocityJointInterface" />
       <arg name="grippers_interface" default="PositionJointInterface" />
@@ -43,6 +42,6 @@
             <remap from="joint_states" to="/yumi/egm/joint_states" />
       </node>
 
-      </group>
+
 
 </launch>
