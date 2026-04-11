@@ -1,17 +1,48 @@
 <launch>
 
-    <!-- Robot IP -->
-    <arg name="robot_ip" default="192.168.125.1"/>
+      <!-- Robot IP -->
+      <arg name="robot_ip" default="192.168.125.1"/>
 
-    <!-- ABB bringup -->
-    <include file="$(find abb_robot_bringup_examples)/launch/ex3_rws_and_egm_yumi_robot.launch">
-        <arg name="robot_ip" value="$(arg robot_ip)" />
-    </include>
+      <!-- ABB bringup -->
+      <include file="$(find abb_robot_bringup_examples)/launch/ex3_rws_and_egm_yumi_robot.launch">
+            <arg name="robot_ip" value="$(arg robot_ip)" />
+      </include>
 
-    <!-- Startup Node -->
-    <node pkg="yumi_ros"
-          type="yumi_startup_node.py"
-          name="yumi_startup"
-          output="screen" />
+
+      <!-- Startup Node -->
+      <node pkg="yumi_ros"
+            type="yumi_startup_node.py"
+            name="yumi_startup"
+            output="screen" />
+
+      <node pkg="yumi_ros"
+            type="yumi_velocity_guard.py"
+            name="yumi_velocity_guard"
+            output="screen" />
+
+      <node pkg="yumi_ros"
+            type="yumi_session_watchdog.py"
+            name="yumi_session_watchdog"
+            output="screen" />
+
+
+      <!-- robot description -->
+      <group ns="yumi">
+
+      <arg name="arms_interface" default="VelocityJointInterface" />
+      <arg name="grippers_interface" default="PositionJointInterface" />
+      <arg name="yumi_parent" default="world" />
+
+      <param name="robot_description"
+            command="$(find xacro)/xacro $(find yumi_description)/urdf/yumi.urdf.xacro arms_interface:=$(arg arms_interface) grippers_interface:=$(arg grippers_interface) yumi_parent:=$(arg yumi_parent)" />
+
+      <node pkg="robot_state_publisher"
+            type="robot_state_publisher"
+            name="robot_state_publisher"
+            output="screen">
+            <remap from="joint_states" to="/yumi/egm/joint_states" />
+      </node>
+
+      </group>
 
 </launch>

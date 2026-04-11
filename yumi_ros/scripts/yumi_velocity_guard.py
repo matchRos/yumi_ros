@@ -12,7 +12,7 @@ class YumiJointVelocityGuard:
         self.cmd_timeout = rospy.get_param("~cmd_timeout", 0.2)
 
         # Conservative default limits
-        self.v_max = rospy.get_param("~v_max", [0.20] * self.n_joints)
+        self.v_max = rospy.get_param("~v_max", [0.40] * self.n_joints)
         self.a_max = rospy.get_param("~a_max", [0.40] * self.n_joints)
 
         # Joint position limits [rad]
