@@ -21,10 +21,6 @@ class SingleArmKinematics:
         self.num_joints = self.chain.getNrOfJoints()
         self.num_segments = self.chain.getNrOfSegments()
 
-        self.publish_only_when_active = rospy.get_param(
-            "~publish_only_when_active", True
-        )
-
         rospy.loginfo(
             f"[{self.arm_name}] base_link={self.base_link}, tip_link={self.tip_link}, "
             f"segments={self.num_segments}, joints={self.num_joints}"
@@ -85,6 +81,9 @@ class YumiDualArmCartesianVelocityController:
         )
         self.output_topic = rospy.get_param(
             "~output_topic", "/yumi/joint_group_velocity_command"
+        )
+        self.publish_only_when_active = rospy.get_param(
+            "~publish_only_when_active", True
         )
 
         rospy.loginfo(f"robot_description_param = {self.robot_description_param}")
