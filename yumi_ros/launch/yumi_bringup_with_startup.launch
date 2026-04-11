@@ -6,7 +6,7 @@
       <!-- ABB bringup -->
       <include file="$(find abb_robot_bringup_examples)/launch/ex3_rws_and_egm_yumi_robot.launch">
             <arg name="robot_ip" value="$(arg robot_ip)" />
-            <!-- <remap from="/joint_states" to="/yumi/egm/joint_states"/> -->
+            <remap from="/joint_states" to="/yumi/egm/joint_states"/>
       </include>
 
 
@@ -27,7 +27,8 @@
             output="screen" />
 
 
-      <node pkg="yumi_ros"
+      <!-- cartesion velocity controller for both arms -->
+      <!-- <node pkg="yumi_ros"
             type="yumi_cartesian_velocity_controller.py"
             name="yumi_dual_arm_cartesian_velocity_controller"
             output="screen">
@@ -47,12 +48,33 @@
             <param name="command_timeout" value="0.2" />
             <param name="max_joint_velocity" value="0.2" />
             <param name="damping" value="0.03" />
-      </node>
+      </node> -->
 
+      <!-- moveit -->
       <include file="$(find yumi_moveit_config)/launch/move_group.launch">
             <!-- <remap from="/joint_states" to="/yumi/egm/joint_states"/> -->
             <remap to="/joint_states" from="/yumi/egm/joint_states"/>
       </include>
+
+      <node pkg="yumi_ros"
+            type="yumi_execute_bridge.py"
+            name="yumi_execute_bridge"
+            output="screen">
+      <param name="rate" value="250.0" />
+      <param name="kp" value="2.0" />
+      <param name="max_vel" value="0.25" />
+      <param name="goal_tolerance" value="0.01" />
+      <param name="goal_settle_time" value="0.3" />
+      </node>
+
+      <!-- joint state republisher to convert from /yumi/egm/joint_states to /joint_states for moveit and other nodes that expect the standard topic name -->
+      <node pkg="yumi_ros"
+            type="yumi_joint_state_republisher.py"
+            name="yumi_joint_state_republisher"
+            output="screen">
+            <remap from="/input_joint_states" to="/yumi/egm/joint_states" />
+            <remap from="/output_joint_states" to="/joint_states" />
+      </node>
 
       <!-- robot description -->
 
