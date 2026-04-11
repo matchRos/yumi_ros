@@ -1,14 +1,40 @@
 #!/usr/bin/env python3
 import sys
 import copy
+import math
 
 import rospy
 import tf
+import PyKDL as kdl
 import moveit_commander
 
 from geometry_msgs.msg import PointStamped, PoseStamped, Pose
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
+from kdl_parser_py.urdf import treeFromParam
+from urdf_parser_py.urdf import URDF
+
+
+class ArmModel:
+    def __init__(
+        self,
+        name,
+        group,
+        base_link,
+        tip_link,
+        elbow_link,
+        joint_names,
+        joint_min,
+        joint_max,
+    ):
+        self.name = name
+        self.group = group
+        self.base_link = base_link
+        self.tip_link = tip_link
+        self.elbow_link = elbow_link
+        self.joint_names = joint_names
+        self.joint_min = np.array(joint_min, dtype=float)
+        self.joint_max = np.array(joint_max, dtype=float)
 
 
 class YumiMoveItPoseTopics:
@@ -16,19 +42,27 @@ class YumiMoveItPoseTopics:
         moveit_commander.roscpp_initialize(sys.argv)
 
         self.base_frame = rospy.get_param("~base_frame", "yumi_base_link")
-        self.left_tip_link = rospy.get_param("~left_tip_link", "yumi_link_7_l")
-        self.right_tip_link = rospy.get_param("~right_tip_link", "yumi_link_7_r")
+        self.world_frame = rospy.get_param("~world_frame", "world")
+        self.robot_description_param = rospy.get_param(
+            "~robot_description_param", "/robot_description"
+        )
+
+        # comparing all candidate plans can be very time-consuming,
+        # so this option allows you to only use the first valid plan found
+        self.compare_all_plans = rospy.get_param("~compare_all_plans", True)
 
         self.velocity_scaling = rospy.get_param("~velocity_scaling", 0.2)
         self.acceleration_scaling = rospy.get_param("~acceleration_scaling", 0.2)
         self.planning_time = rospy.get_param("~planning_time", 3.0)
         self.num_planning_attempts = rospy.get_param("~num_planning_attempts", 5)
-        self.startup_delay = rospy.get_param("~startup_delay", 0.1)
+        self.num_candidate_plans = rospy.get_param("~num_candidate_plans", 6)
 
-        rospy.sleep(self.startup_delay)
+        self.score_weight_elbow_z = rospy.get_param("~score_weight_elbow_z", 3.0)
+        self.score_weight_joint_margin = rospy.get_param(
+            "~score_weight_joint_margin", 1.5
+        )
+        self.score_weight_motion = rospy.get_param("~score_weight_motion", 0.4)
 
-        # Facing-down orientation as quaternion [x, y, z, w]
-        # This is a placeholder that may need adjustment depending on your tool frame.
         self.left_facing_down_quat = rospy.get_param(
             "~left_facing_down_quat",
             [1.0, 0.0, 0.0, 0.0],
@@ -37,6 +71,10 @@ class YumiMoveItPoseTopics:
             "~right_facing_down_quat",
             [1.0, 0.0, 0.0, 0.0],
         )
+
+        # wait for move_group and other components to start up
+        self.startup_delay = rospy.get_param("~startup_delay", 0.1)
+        rospy.sleep(self.startup_delay)
 
         rospy.wait_for_message("/joint_states", JointState, timeout=5.0)
 
@@ -52,11 +90,59 @@ class YumiMoveItPoseTopics:
             group.set_planning_time(self.planning_time)
             group.set_num_planning_attempts(self.num_planning_attempts)
 
+        self.current_joint_map = {}
+        rospy.Subscriber(
+            "/joint_states",
+            JointState,
+            self.joint_state_cb,
+            queue_size=1,
+        )
+
         self.traj_pub = rospy.Publisher(
             "/yumi/moveit_joint_trajectory",
             JointTrajectory,
             queue_size=1,
             latch=True,
+        )
+
+        self._build_kdl()
+
+        self.left_arm = ArmModel(
+            name="left",
+            group=self.left_group,
+            base_link=self.base_frame,
+            tip_link=rospy.get_param("~left_tip_link", "yumi_link_7_l"),
+            elbow_link=rospy.get_param("~left_elbow_link", "yumi_link_4_l"),
+            joint_names=[
+                "yumi_robl_joint_1",
+                "yumi_robl_joint_2",
+                "yumi_robl_joint_3",
+                "yumi_robl_joint_4",
+                "yumi_robl_joint_5",
+                "yumi_robl_joint_6",
+                "yumi_robl_joint_7",
+            ],
+            joint_min=[-2.94, -2.50, -2.94, -2.16, -5.06, -1.54, -3.99],
+            joint_max=[2.94, 0.76, 2.94, 1.40, 5.06, 2.41, 3.99],
+        )
+
+        self.right_arm = ArmModel(
+            name="right",
+            group=self.right_group,
+            base_link=self.base_frame,
+            tip_link=rospy.get_param("~right_tip_link", "yumi_link_7_r"),
+            elbow_link=rospy.get_param("~right_elbow_link", "yumi_link_4_r"),
+            joint_names=[
+                "yumi_robr_joint_1",
+                "yumi_robr_joint_2",
+                "yumi_robr_joint_3",
+                "yumi_robr_joint_4",
+                "yumi_robr_joint_5",
+                "yumi_robr_joint_6",
+                "yumi_robr_joint_7",
+            ],
+            joint_min=[-2.94, -2.50, -2.94, -2.16, -5.06, -1.54, -3.99],
+            joint_max=[2.94, 0.76, 2.94, 1.40, 5.06, 2.41, 3.99],
         )
 
         rospy.Subscriber(
@@ -97,7 +183,27 @@ class YumiMoveItPoseTopics:
             queue_size=1,
         )
 
-        rospy.loginfo("YuMi MoveIt pose topics node started")
+        rospy.loginfo("YuMi MoveIt pose topics node with scoring started")
+
+    def _build_kdl(self):
+        ok, tree = treeFromParam(self.robot_description_param)
+        if not ok:
+            raise RuntimeError(
+                f"Could not parse URDF from parameter {self.robot_description_param}"
+            )
+        self.kdl_tree = tree
+
+    def joint_state_cb(self, msg):
+        for name, pos in zip(msg.name, msg.position):
+            self.current_joint_map[name] = pos
+
+    def get_current_joint_values_for_arm(self, arm_model):
+        vals = []
+        for name in arm_model.joint_names:
+            if name not in self.current_joint_map:
+                return None
+            vals.append(self.current_joint_map[name])
+        return np.array(vals, dtype=float)
 
     def get_current_pose_tf(self, tip_link):
         self.tf_listener.waitForTransform(
@@ -117,61 +223,176 @@ class YumiMoveItPoseTopics:
         pose.orientation.w = rot[3]
         return pose
 
+    def transform_point_to_base(self, point_msg):
+        if point_msg.header.frame_id in ["", self.base_frame]:
+            return point_msg
+
+        self.tf_listener.waitForTransform(
+            self.base_frame,
+            point_msg.header.frame_id,
+            rospy.Time(0),
+            rospy.Duration(2.0),
+        )
+        return self.tf_listener.transformPoint(self.base_frame, point_msg)
+
+    def transform_pose_to_base(self, pose_msg):
+        if pose_msg.header.frame_id in ["", self.base_frame]:
+            return pose_msg
+
+        self.tf_listener.waitForTransform(
+            self.base_frame,
+            pose_msg.header.frame_id,
+            rospy.Time(0),
+            rospy.Duration(2.0),
+        )
+        return self.tf_listener.transformPose(self.base_frame, pose_msg)
+
     def build_pose_with_current_orientation(self, point_msg, tip_link):
+        point_in_base = self.transform_point_to_base(point_msg)
         current_pose = self.get_current_pose_tf(tip_link)
+
         target_pose = copy.deepcopy(current_pose)
-        target_pose.position.x = point_msg.point.x
-        target_pose.position.y = point_msg.point.y
-        target_pose.position.z = point_msg.point.z
+        target_pose.position.x = point_in_base.point.x
+        target_pose.position.y = point_in_base.point.y
+        target_pose.position.z = point_in_base.point.z
         return target_pose
 
     def build_pose_with_fixed_orientation(self, point_msg, quat):
+        point_in_base = self.transform_point_to_base(point_msg)
         target_pose = Pose()
-        target_pose.position.x = point_msg.point.x
-        target_pose.position.y = point_msg.point.y
-        target_pose.position.z = point_msg.point.z
+        target_pose.position.x = point_in_base.point.x
+        target_pose.position.y = point_in_base.point.y
+        target_pose.position.z = point_in_base.point.z
         target_pose.orientation.x = quat[0]
         target_pose.orientation.y = quat[1]
         target_pose.orientation.z = quat[2]
         target_pose.orientation.w = quat[3]
         return target_pose
 
-    def plan_and_publish(self, group, target_pose, label):
-        group.clear_pose_targets()
-        group.set_start_state_to_current_state()
-        group.set_pose_target(target_pose)
+    def build_pose_from_pose_msg(self, pose_msg):
+        pose_in_base = self.transform_pose_to_base(pose_msg)
+        return pose_in_base.pose
 
-        result = group.plan()
+    def compute_fk_translation(self, base_link, tip_link, joint_values):
+        chain = self.kdl_tree.getChain(base_link, tip_link)
+        fk_solver = kdl.ChainFkSolverPos_recursive(chain)
 
-        if isinstance(result, tuple):
-            success, plan, planning_time, error_code = result
-        else:
-            plan = result
-            success = (
-                hasattr(plan, "joint_trajectory")
-                and len(plan.joint_trajectory.points) > 0
+        q_kdl = kdl.JntArray(len(joint_values))
+        for i, q in enumerate(joint_values):
+            q_kdl[i] = float(q)
+
+        frame = kdl.Frame()
+        fk_solver.JntToCart(q_kdl, frame)
+
+        return np.array([frame.p[0], frame.p[1], frame.p[2]], dtype=float)
+
+    def compute_joint_margin_score(self, arm_model, q):
+        lower_margin = q - arm_model.joint_min
+        upper_margin = arm_model.joint_max - q
+        min_margin = np.minimum(lower_margin, upper_margin)
+        min_margin = np.maximum(min_margin, 0.0)
+
+        joint_ranges = np.maximum(arm_model.joint_max - arm_model.joint_min, 1e-6)
+        normalized = min_margin / joint_ranges
+        return float(np.mean(normalized))
+
+    def score_plan(self, arm_model, plan, q_current):
+        jt = plan.joint_trajectory
+        if len(jt.points) == 0:
+            return -1e9
+
+        joint_name_to_idx = {n: i for i, n in enumerate(jt.joint_names)}
+        try:
+            q_final = np.array(
+                [
+                    jt.points[-1].positions[joint_name_to_idx[j]]
+                    for j in arm_model.joint_names
+                ],
+                dtype=float,
+            )
+        except KeyError:
+            rospy.logwarn("Trajectory joint names do not match expected arm joints")
+            return -1e9
+
+        elbow_pos = self.compute_fk_translation(
+            arm_model.base_link,
+            arm_model.elbow_link,
+            q_final,
+        )
+        elbow_z = float(elbow_pos[2])
+
+        joint_margin_score = self.compute_joint_margin_score(arm_model, q_final)
+        motion_cost = float(np.linalg.norm(q_final - q_current))
+
+        score = (
+            self.score_weight_elbow_z * elbow_z
+            + self.score_weight_joint_margin * joint_margin_score
+            - self.score_weight_motion * motion_cost
+        )
+
+        return score
+
+    def plan_best(self, arm_model, target_pose, label):
+        q_current = self.get_current_joint_values_for_arm(arm_model)
+        if q_current is None:
+            rospy.logerr(f"No current joint state for {label}")
+            return None
+
+        best_plan = None
+        best_score = -1e9
+
+        if not self.compare_all_plans:
+            self.num_candidate_plans = 1
+        for i in range(self.num_candidate_plans):
+            arm_model.group.clear_pose_targets()
+            arm_model.group.set_start_state_to_current_state()
+            arm_model.group.set_pose_target(target_pose)
+
+            result = arm_model.group.plan()
+
+            if isinstance(result, tuple):
+                success, plan, planning_time, error_code = result
+            else:
+                plan = result
+                success = (
+                    hasattr(plan, "joint_trajectory")
+                    and len(plan.joint_trajectory.points) > 0
+                )
+
+            if not success or len(plan.joint_trajectory.points) == 0:
+                continue
+
+            score = self.score_plan(arm_model, plan, q_current)
+            rospy.loginfo(
+                f"[{label}] candidate {i+1}/{self.num_candidate_plans} score = {score:.4f}"
             )
 
-        if not success or len(plan.joint_trajectory.points) == 0:
-            rospy.logerr(f"Planning failed for {label}")
-            group.clear_pose_targets()
-            return
+            if score > best_score:
+                best_score = score
+                best_plan = plan
 
+        arm_model.group.clear_pose_targets()
+
+        if best_plan is None:
+            rospy.logerr(f"Planning failed for {label}")
+            return None
+
+        rospy.loginfo(f"[{label}] selected best score = {best_score:.4f}")
+        return best_plan
+
+    def publish_plan(self, plan, label):
         self.traj_pub.publish(plan.joint_trajectory)
         rospy.loginfo(
             f"Published trajectory for {label} with "
             f"{len(plan.joint_trajectory.points)} points"
         )
-        group.clear_pose_targets()
 
     def left_position_current_orientation_cb(self, msg):
         try:
-            pose = self.build_pose_with_current_orientation(msg, self.left_tip_link)
-            self.plan_and_publish(
-                self.left_group,
-                pose,
-                "left_arm current_orientation",
-            )
+            pose = self.build_pose_with_current_orientation(msg, self.left_arm.tip_link)
+            plan = self.plan_best(self.left_arm, pose, "left_arm current_orientation")
+            if plan is not None:
+                self.publish_plan(plan, "left_arm current_orientation")
         except Exception as exc:
             rospy.logerr(f"Left current-orientation target failed: {exc}")
 
@@ -181,32 +402,29 @@ class YumiMoveItPoseTopics:
                 msg,
                 self.left_facing_down_quat,
             )
-            self.plan_and_publish(
-                self.left_group,
-                pose,
-                "left_arm facing_down",
-            )
+            plan = self.plan_best(self.left_arm, pose, "left_arm facing_down")
+            if plan is not None:
+                self.publish_plan(plan, "left_arm facing_down")
         except Exception as exc:
             rospy.logerr(f"Left facing-down target failed: {exc}")
 
     def left_pose_cb(self, msg):
         try:
-            self.plan_and_publish(
-                self.left_group,
-                msg.pose,
-                "left_arm full_pose",
-            )
+            pose = self.build_pose_from_pose_msg(msg)
+            plan = self.plan_best(self.left_arm, pose, "left_arm full_pose")
+            if plan is not None:
+                self.publish_plan(plan, "left_arm full_pose")
         except Exception as exc:
             rospy.logerr(f"Left full-pose target failed: {exc}")
 
     def right_position_current_orientation_cb(self, msg):
         try:
-            pose = self.build_pose_with_current_orientation(msg, self.right_tip_link)
-            self.plan_and_publish(
-                self.right_group,
-                pose,
-                "right_arm current_orientation",
+            pose = self.build_pose_with_current_orientation(
+                msg, self.right_arm.tip_link
             )
+            plan = self.plan_best(self.right_arm, pose, "right_arm current_orientation")
+            if plan is not None:
+                self.publish_plan(plan, "right_arm current_orientation")
         except Exception as exc:
             rospy.logerr(f"Right current-orientation target failed: {exc}")
 
@@ -216,26 +434,25 @@ class YumiMoveItPoseTopics:
                 msg,
                 self.right_facing_down_quat,
             )
-            self.plan_and_publish(
-                self.right_group,
-                pose,
-                "right_arm facing_down",
-            )
+            plan = self.plan_best(self.right_arm, pose, "right_arm facing_down")
+            if plan is not None:
+                self.publish_plan(plan, "right_arm facing_down")
         except Exception as exc:
             rospy.logerr(f"Right facing-down target failed: {exc}")
 
     def right_pose_cb(self, msg):
         try:
-            self.plan_and_publish(
-                self.right_group,
-                msg.pose,
-                "right_arm full_pose",
-            )
+            pose = self.build_pose_from_pose_msg(msg)
+            plan = self.plan_best(self.right_arm, pose, "right_arm full_pose")
+            if plan is not None:
+                self.publish_plan(plan, "right_arm full_pose")
         except Exception as exc:
             rospy.logerr(f"Right full-pose target failed: {exc}")
 
 
 if __name__ == "__main__":
+    import numpy as np
+
     rospy.init_node("yumi_moveit_pose_topics")
     try:
         YumiMoveItPoseTopics()
