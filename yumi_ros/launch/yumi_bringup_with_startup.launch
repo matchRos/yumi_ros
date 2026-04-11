@@ -28,7 +28,7 @@
 
 
       <!-- cartesion velocity controller for both arms -->
-      <!-- <node pkg="yumi_ros"
+      <node pkg="yumi_ros"
             type="yumi_cartesian_velocity_controller.py"
             name="yumi_dual_arm_cartesian_velocity_controller"
             output="screen">
@@ -48,7 +48,7 @@
             <param name="command_timeout" value="0.2" />
             <param name="max_joint_velocity" value="0.2" />
             <param name="damping" value="0.03" />
-      </node> -->
+      </node>
 
       <!-- moveit -->
       <include file="$(find yumi_moveit_config)/launch/move_group.launch">

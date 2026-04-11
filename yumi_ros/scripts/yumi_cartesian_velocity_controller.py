@@ -21,6 +21,10 @@ class SingleArmKinematics:
         self.num_joints = self.chain.getNrOfJoints()
         self.num_segments = self.chain.getNrOfSegments()
 
+        self.publish_only_when_active = rospy.get_param(
+            "~publish_only_when_active", True
+        )
+
         rospy.loginfo(
             f"[{self.arm_name}] base_link={self.base_link}, tip_link={self.tip_link}, "
             f"segments={self.num_segments}, joints={self.num_joints}"
@@ -227,6 +231,24 @@ class YumiDualArmCartesianVelocityController:
 
     def update(self, event):
         if event.last_real is None:
+            return
+
+        # dont publish if neither arm has an active command. might mess with other controllers that are active
+        left_active = (
+            rospy.Time.now() - self.latest_left_twist_time
+        ).to_sec() <= self.command_timeout
+        right_active = (
+            rospy.Time.now() - self.latest_right_twist_time
+        ).to_sec() <= self.command_timeout
+
+        desired_left_twist = self.get_active_twist(
+            self.latest_left_twist, self.latest_left_twist_time
+        )
+        desired_right_twist = self.get_active_twist(
+            self.latest_right_twist, self.latest_right_twist_time
+        )
+
+        if self.publish_only_when_active and not left_active and not right_active:
             return
 
         q_left = self.get_joint_positions(self.left_joint_names)
