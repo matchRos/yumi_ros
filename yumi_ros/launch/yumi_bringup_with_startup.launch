@@ -53,6 +53,21 @@
       <include file="$(find yumi_moveit_config)/launch/move_group.launch">
       </include>
 
+      <!-- homig service -->
+      <node pkg="yumi_ros"
+            type="move_both_arms_home.py"
+            name="move_both_arms_home"
+            output="screen">
+            <param name="startup_delay" value="16" />
+      </node>
+
+      <!-- cartesian pose servo. Allows the user to command a cartesian pose for the end effector -->
+      <node pkg="yumi_ros"
+            type="yumi_cartesian_pose_servo.py"
+            name="yumi_cartesian_pose_servo"
+            output="screen">
+      </node>
+
       <!-- this bridges allows the yumi_cartesian_velocity_controller to execute MoveIt pose goals by converting them to cartesian velocity commands and sending them to the appropriate topics. It also handles goal tolerances and settling time to ensure smooth execution of MoveIt plans. The parameters can be tuned for better performance based on the specific use case and robot configuration. -->
       <node pkg="yumi_ros"
             type="yumi_execute_bridge.py"
