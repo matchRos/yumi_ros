@@ -184,7 +184,7 @@ class YumiSmartGripperDriver:
 
         self.min_pos_mm = rospy.get_param("~min_pos_mm", 0.0)
         # TODO: later raise back to 25.0 mm
-        self.max_pos_mm = rospy.get_param("~max_pos_mm", 19.0)
+        self.max_pos_mm = rospy.get_param("~max_pos_mm", 15.0)
 
         # If the URDF joint is prismatic in meters, 0.001 is correct.
         self.joint_scale = rospy.get_param("~joint_scale", 0.001)
