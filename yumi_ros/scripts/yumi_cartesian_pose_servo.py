@@ -75,7 +75,6 @@ def quat_slerp(q0, q1, s):
 
 
 def shortest_quat(q_from, q_to):
-    # Ensure shortest-path interpolation
     dot = sum(q_from[i] * q_to[i] for i in range(4))
     if dot < 0.0:
         return [-q_to[0], -q_to[1], -q_to[2], -q_to[3]]
@@ -83,15 +82,11 @@ def shortest_quat(q_from, q_to):
 
 
 def quat_error_rotvec(q_current, q_target):
-    """
-    Returns orientation error as a rotation vector in the current/base frame.
-    """
     q_current = normalize_quat(q_current)
     q_target = normalize_quat(q_target)
     q_delta = quat_multiply(q_target, quat_inverse(q_current))
     q_delta = normalize_quat(q_delta)
 
-    # Keep shortest rotation
     if q_delta[3] < 0.0:
         q_delta = [-q_delta[0], -q_delta[1], -q_delta[2], -q_delta[3]]
 
@@ -105,9 +100,6 @@ def quat_error_rotvec(q_current, q_target):
 
 
 def angular_velocity_from_quats(q_prev, q_next, dt):
-    """
-    Approximate angular velocity from two nearby desired orientations.
-    """
     if dt <= 0.0:
         return [0.0, 0.0, 0.0]
 
@@ -129,11 +121,6 @@ def angular_velocity_from_quats(q_prev, q_next, dt):
 
 
 def quintic_time_scaling(t, T):
-    """
-    C2 time scaling:
-        s(t)   = 10*tau^3 - 15*tau^4 + 6*tau^5
-        ds/dt  = (30*tau^2 - 60*tau^3 + 30*tau^4) / T
-    """
     if T <= 1e-9:
         return 1.0, 0.0
 
@@ -149,11 +136,12 @@ def quintic_time_scaling(t, T):
 
 
 class CartesianMotionProfile:
-    def __init__(self, start_pose, target_pose, duration):
+    def __init__(self, start_pose, target_pose, duration, max_linear_speed=None):
         self.start_pose = copy.deepcopy(start_pose)
         self.target_pose = copy.deepcopy(target_pose)
         self.duration = max(duration, 1e-3)
         self.start_time = rospy.Time.now()
+        self.max_linear_speed = max_linear_speed
 
         self.p0, self.q0 = pose_to_pos_quat(self.start_pose)
         self.p1, self.q1 = pose_to_pos_quat(self.target_pose)
@@ -169,7 +157,6 @@ class CartesianMotionProfile:
 
         q_des = quat_slerp(self.q0, self.q1, s)
 
-        # Preview a small step forward to derive angular feedforward
         t2 = min(t + dt_preview, self.duration)
         s2, _ = quintic_time_scaling(t2, self.duration)
         q_des_2 = quat_slerp(self.q0, self.q1, s2)
@@ -181,10 +168,18 @@ class CartesianMotionProfile:
 
 class ArmServo:
     def __init__(
-        self, name, pose_topic, twist_topic, tip_link, base_frame, tf_listener
+        self,
+        name,
+        pose_topic,
+        slow_pose_topic,
+        twist_topic,
+        tip_link,
+        base_frame,
+        tf_listener,
     ):
         self.name = name
         self.pose_topic = pose_topic
+        self.slow_pose_topic = slow_pose_topic
         self.twist_topic = twist_topic
         self.tip_link = tip_link
         self.base_frame = base_frame
@@ -196,6 +191,9 @@ class ArmServo:
         self.max_linear_speed = rospy.get_param(f"~{name}_max_linear_speed", 0.30)
         self.max_angular_speed = rospy.get_param(f"~{name}_max_angular_speed", 0.90)
         self.min_duration = rospy.get_param(f"~{name}_min_duration", 1.0)
+        self.slow_approach_linear_speed = rospy.get_param(
+            f"~{name}_slow_approach_linear_speed", 0.02
+        )
 
         self.kp_pos = rospy.get_param(f"~{name}_kp_pos", 1.5)
         self.kp_rot = rospy.get_param(f"~{name}_kp_rot", 1.5)
@@ -204,8 +202,12 @@ class ArmServo:
         self.rot_tolerance = rospy.get_param(f"~{name}_rot_tolerance", 0.03)
 
         self.pub = rospy.Publisher(self.twist_topic, TwistStamped, queue_size=1)
-        self.sub = rospy.Subscriber(
-            self.pose_topic, PoseStamped, self.target_cb, queue_size=1
+
+        self.sub_normal = rospy.Subscriber(
+            self.pose_topic, PoseStamped, self.target_cb_normal, queue_size=1
+        )
+        self.sub_slow = rospy.Subscriber(
+            self.slow_pose_topic, PoseStamped, self.target_cb_slow, queue_size=1
         )
 
     def get_current_pose_tf(self):
@@ -242,7 +244,7 @@ class ArmServo:
         )
         return self.tf_listener.transformPose(self.base_frame, pose_msg)
 
-    def estimate_duration(self, start_pose, target_pose):
+    def estimate_duration(self, start_pose, target_pose, linear_speed_limit):
         p0, q0 = pose_to_pos_quat(start_pose)
         p1, q1 = pose_to_pos_quat(target_pose)
 
@@ -250,28 +252,40 @@ class ArmServo:
         rotvec = quat_error_rotvec(q0, q1)
         dang = vec_norm(rotvec)
 
-        T_lin = dpos / max(self.max_linear_speed * 0.5, 1e-3)
+        T_lin = dpos / max(linear_speed_limit * 0.5, 1e-3)
         T_rot = dang / max(self.max_angular_speed * 0.5, 1e-3)
         return max(self.min_duration, T_lin, T_rot)
 
-    def target_cb(self, msg):
+    def accept_target(self, msg, linear_speed_limit, mode_name):
         try:
             msg_base = self.transform_pose_to_base(msg)
             current_pose = self.get_current_pose_tf()
-            duration = self.estimate_duration(current_pose, msg_base.pose)
+            duration = self.estimate_duration(
+                current_pose,
+                msg_base.pose,
+                linear_speed_limit,
+            )
 
             with self.lock:
                 self.active_profile = CartesianMotionProfile(
                     start_pose=current_pose,
                     target_pose=msg_base.pose,
                     duration=duration,
+                    max_linear_speed=linear_speed_limit,
                 )
 
             rospy.loginfo(
-                f"[{self.name}] New Cartesian target accepted, duration={duration:.2f} s"
+                f"[{self.name}] New {mode_name} Cartesian target accepted, "
+                f"duration={duration:.2f} s, max_linear_speed={linear_speed_limit:.3f} m/s"
             )
         except Exception as e:
             rospy.logerr(f"[{self.name}] Failed to accept target pose: {e}")
+
+    def target_cb_normal(self, msg):
+        self.accept_target(msg, self.max_linear_speed, "normal")
+
+    def target_cb_slow(self, msg):
+        self.accept_target(msg, self.slow_approach_linear_speed, "slow")
 
     def publish_zero(self):
         msg = TwistStamped()
@@ -307,12 +321,16 @@ class ArmServo:
         v_cmd = vec_add(v_ff, v_fb)
         w_cmd = vec_add(w_ff, w_fb)
 
-        # Saturate linear velocity
-        v_norm = vec_norm(v_cmd)
-        if v_norm > self.max_linear_speed:
-            v_cmd = vec_scale(v_cmd, self.max_linear_speed / v_norm)
+        active_max_linear_speed = (
+            profile.max_linear_speed
+            if profile.max_linear_speed is not None
+            else self.max_linear_speed
+        )
 
-        # Saturate angular velocity
+        v_norm = vec_norm(v_cmd)
+        if v_norm > active_max_linear_speed:
+            v_cmd = vec_scale(v_cmd, active_max_linear_speed / v_norm)
+
         w_norm = vec_norm(w_cmd)
         if w_norm > self.max_angular_speed:
             w_cmd = vec_scale(w_cmd, self.max_angular_speed / w_norm)
@@ -353,6 +371,9 @@ class YumiCartesianPoseServo:
             pose_topic=rospy.get_param(
                 "~left_pose_topic", "/yumi/robl/cartesian_pose_command"
             ),
+            slow_pose_topic=rospy.get_param(
+                "~left_slow_pose_topic", "/yumi/robl/slowly_approach_pose"
+            ),
             twist_topic=rospy.get_param(
                 "~left_twist_topic", "/yumi/robl/cartesian_velocity_command"
             ),
@@ -365,6 +386,9 @@ class YumiCartesianPoseServo:
             name="right",
             pose_topic=rospy.get_param(
                 "~right_pose_topic", "/yumi/robr/cartesian_pose_command"
+            ),
+            slow_pose_topic=rospy.get_param(
+                "~right_slow_pose_topic", "/yumi/robr/slowly_approach_pose"
             ),
             twist_topic=rospy.get_param(
                 "~right_twist_topic", "/yumi/robr/cartesian_velocity_command"

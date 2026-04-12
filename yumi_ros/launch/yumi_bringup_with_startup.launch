@@ -33,10 +33,10 @@
             output="screen">
             <param name="robot_description_param" value="/robot_description" />
 
-            <param name="left_base_link" value="yumi_base_link" />
+            <param name="left_base_link" value="world" />
             <param name="left_tip_link" value="yumi_tcp_l" />
 
-            <param name="right_base_link" value="yumi_base_link" />
+            <param name="right_base_link" value="world" />
             <param name="right_tip_link" value="yumi_tcp_r" />
 
             <param name="left_input_topic" value="/yumi/robl/cartesian_velocity_command" />
@@ -45,7 +45,7 @@
 
             <param name="publish_rate" value="250.0" />
             <param name="command_timeout" value="0.2" />
-            <param name="max_joint_velocity" value="0.2" />
+            <param name="max_joint_velocity" value="0.3" />
             <param name="damping" value="0.03" />
       </node>
 
