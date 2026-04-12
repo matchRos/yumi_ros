@@ -295,6 +295,13 @@
     </link>
 
 
+    <link name="yumi_tcp_r"/>
+
+    <joint name="yumi_tcp_r_joint" type="fixed">
+      <parent link="yumi_link_7_r"/>
+      <child link="yumi_tcp_r"/>
+      <origin xyz="0 0 0.138" rpy="0 0 0"/>
+    </joint>
 
 
     <!--///////////////////////////////////// LEFT ARM ////////////////////////////////  -->
@@ -543,6 +550,16 @@
         <material name="Grey"/>
       </collision>
     </link>
+
+
+    <link name="yumi_tcp_l"/>
+
+    <joint name="yumi_tcp_l_joint" type="fixed">
+      <parent link="yumi_link_7_l"/>
+      <child link="yumi_tcp_l"/>
+      <origin xyz="0 0 0.138" rpy="0 0 0"/>
+    </joint>
+
 
     <!--Extensions -->
     <xacro:yumi_gazebo name="${name}" />

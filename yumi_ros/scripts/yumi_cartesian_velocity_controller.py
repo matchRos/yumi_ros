@@ -118,7 +118,7 @@ class YumiDualArmCartesianVelocityController:
             tree=tree,
             arm_name="left",
             base_link=rospy.get_param("~left_base_link", "yumi_base_link"),
-            tip_link=rospy.get_param("~left_tip_link", "yumi_link_7_l"),
+            tip_link=rospy.get_param("~left_tip_link", "yumi_tcp_l"),
             joint_names=self.left_joint_names,
             damping=self.damping,
         )
@@ -127,7 +127,7 @@ class YumiDualArmCartesianVelocityController:
             tree=tree,
             arm_name="right",
             base_link=rospy.get_param("~right_base_link", "yumi_base_link"),
-            tip_link=rospy.get_param("~right_tip_link", "yumi_link_7_r"),
+            tip_link=rospy.get_param("~right_tip_link", "yumi_tcp_r"),
             joint_names=self.right_joint_names,
             damping=self.damping,
         )

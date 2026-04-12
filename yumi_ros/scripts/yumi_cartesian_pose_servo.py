@@ -356,7 +356,7 @@ class YumiCartesianPoseServo:
             twist_topic=rospy.get_param(
                 "~left_twist_topic", "/yumi/robl/cartesian_velocity_command"
             ),
-            tip_link=rospy.get_param("~left_tip_link", "yumi_link_7_l"),
+            tip_link=rospy.get_param("~left_tip_link", "yumi_tcp_l"),
             base_frame=self.base_frame,
             tf_listener=self.tf_listener,
         )
@@ -369,7 +369,7 @@ class YumiCartesianPoseServo:
             twist_topic=rospy.get_param(
                 "~right_twist_topic", "/yumi/robr/cartesian_velocity_command"
             ),
-            tip_link=rospy.get_param("~right_tip_link", "yumi_link_7_r"),
+            tip_link=rospy.get_param("~right_tip_link", "yumi_tcp_r"),
             base_frame=self.base_frame,
             tf_listener=self.tf_listener,
         )
