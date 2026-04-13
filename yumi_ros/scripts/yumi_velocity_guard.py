@@ -3,6 +3,7 @@ import math
 import rospy
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import JointState
+from urdf_parser_py.urdf import URDF
 
 
 class YumiJointVelocityGuard:
@@ -10,15 +11,9 @@ class YumiJointVelocityGuard:
         self.n_joints = 14
         self.rate_hz = rospy.get_param("~rate", 100.0)
         self.cmd_timeout = rospy.get_param("~cmd_timeout", 0.2)
-
-        # Conservative default limits
-        self.v_max = rospy.get_param("~v_max", [0.40] * self.n_joints)
-        self.a_max = rospy.get_param("~a_max", [0.40] * self.n_joints)
-
-        # Joint position limits [rad]
-        self.q_min = rospy.get_param("~q_min", [-3.14] * self.n_joints)
-        self.q_max = rospy.get_param("~q_max", [3.14] * self.n_joints)
-        self.limit_margin = rospy.get_param("~limit_margin", [0.05] * self.n_joints)
+        self.robot_description_param = rospy.get_param(
+            "~robot_description_param", "/robot_description"
+        )
 
         self.joint_names_expected = [
             "yumi_robl_joint_1",
@@ -37,9 +32,16 @@ class YumiJointVelocityGuard:
             "yumi_robr_joint_7",
         ]
 
-        self.current_pos = None
-        self.current_joint_names = None
+        # Conservative default limits only as fallback
+        self.v_max = rospy.get_param("~v_max", [0.40] * self.n_joints)
+        self.a_max = rospy.get_param("~a_max", [0.40] * self.n_joints)
+        self.limit_margin = rospy.get_param("~limit_margin", [0.03] * self.n_joints)
 
+        self.q_min = [-3.14] * self.n_joints
+        self.q_max = [3.14] * self.n_joints
+        self.load_joint_limits_from_urdf()
+
+        self.current_pos = None
         self.target_cmd = [0.0] * self.n_joints
         self.filtered_cmd = [0.0] * self.n_joints
         self.last_cmd_time = rospy.Time(0)
@@ -63,6 +65,46 @@ class YumiJointVelocityGuard:
 
         self.timer = rospy.Timer(rospy.Duration(1.0 / self.rate_hz), self.update)
 
+    def load_joint_limits_from_urdf(self):
+        try:
+            robot = URDF.from_parameter_server(key=self.robot_description_param)
+            joint_map = {j.name: j for j in robot.joints}
+
+            q_min = []
+            q_max = []
+
+            for joint_name in self.joint_names_expected:
+                if joint_name not in joint_map:
+                    rospy.logwarn(
+                        f"Joint {joint_name} not found in URDF, using fallback limits"
+                    )
+                    q_min.append(-3.14)
+                    q_max.append(3.14)
+                    continue
+
+                joint = joint_map[joint_name]
+                if joint.limit is None:
+                    rospy.logwarn(
+                        f"Joint {joint_name} has no URDF limit, using fallback limits"
+                    )
+                    q_min.append(-3.14)
+                    q_max.append(3.14)
+                    continue
+
+                q_min.append(float(joint.limit.lower))
+                q_max.append(float(joint.limit.upper))
+
+            self.q_min = q_min
+            self.q_max = q_max
+
+            rospy.loginfo("Loaded joint position limits from URDF:")
+            for i, name in enumerate(self.joint_names_expected):
+                rospy.loginfo(f"  {name}: [{self.q_min[i]:.4f}, {self.q_max[i]:.4f}]")
+
+        except Exception as e:
+            rospy.logwarn(f"Failed to load joint limits from URDF: {e}")
+            rospy.logwarn("Using fallback joint limits")
+
     def command_cb(self, msg):
         if len(msg.data) != self.n_joints:
             rospy.logwarn_throttle(
@@ -83,21 +125,22 @@ class YumiJointVelocityGuard:
         self.last_cmd_time = rospy.Time.now()
 
     def joint_state_cb(self, msg):
-        if len(msg.name) < self.n_joints or len(msg.position) < self.n_joints:
-            rospy.logwarn_throttle(1.0, "JointState message too short")
+        if len(msg.name) != len(msg.position):
+            rospy.logwarn_throttle(1.0, "JointState name/position length mismatch")
             return
 
-        if self.current_joint_names is None:
-            self.current_joint_names = list(msg.name[: self.n_joints])
+        joint_map = {name: pos for name, pos in zip(msg.name, msg.position)}
 
-            if self.current_joint_names != self.joint_names_expected:
-                rospy.logwarn("Joint name order differs from expected order")
-                rospy.logwarn(f"Received: {self.current_joint_names}")
-                rospy.logwarn(f"Expected: {self.joint_names_expected}")
-            else:
-                rospy.loginfo("Joint name order matches expected YuMi EGM order")
+        reordered = []
+        for joint_name in self.joint_names_expected:
+            if joint_name not in joint_map:
+                rospy.logwarn_throttle(
+                    1.0, f"Missing joint in JointState: {joint_name}"
+                )
+                return
+            reordered.append(joint_map[joint_name])
 
-        self.current_pos = list(msg.position[: self.n_joints])
+        self.current_pos = reordered
 
     def clamp_velocity(self, cmd):
         out = [0.0] * self.n_joints
@@ -126,13 +169,21 @@ class YumiJointVelocityGuard:
             q_max = self.q_max[i]
             margin = self.limit_margin[i]
 
-            # Near upper limit: only allow motion back away from the limit
-            if q >= q_max - margin:
-                out[i] = min(out[i], 0.0)
+            if q >= q_max - margin and out[i] > 0.0:
+                rospy.logwarn_throttle(
+                    0.5,
+                    f"Blocking joint {self.joint_names_expected[i]} near upper limit: "
+                    f"q={q:.4f}, q_max={q_max:.4f}, cmd={out[i]:.4f}",
+                )
+                out[i] = 0.0
 
-            # Near lower limit: only allow motion back away from the limit
-            if q <= q_min + margin:
-                out[i] = max(out[i], 0.0)
+            if q <= q_min + margin and out[i] < 0.0:
+                rospy.logwarn_throttle(
+                    0.5,
+                    f"Blocking joint {self.joint_names_expected[i]} near lower limit: "
+                    f"q={q:.4f}, q_min={q_min:.4f}, cmd={out[i]:.4f}",
+                )
+                out[i] = 0.0
 
         return out
 
@@ -163,6 +214,7 @@ class YumiJointVelocityGuard:
         limited_cmd = self.apply_acceleration_limit(limited_cmd, dt)
 
         self.filtered_cmd = limited_cmd
+
         self.publish_command(self.filtered_cmd)
 
 

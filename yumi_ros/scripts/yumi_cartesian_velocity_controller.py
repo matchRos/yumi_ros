@@ -72,6 +72,9 @@ class YumiDualArmCartesianVelocityController:
         self.publish_rate = rospy.get_param("~publish_rate", 100.0)
         self.max_joint_velocity = rospy.get_param("~max_joint_velocity", 0.2)
         self.damping = rospy.get_param("~damping", 0.03)
+        # the ABB controller will just ignore very small commands to avoid jitter around zero velocity
+        self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.01)
+        self.min_joint_velocity_eps = rospy.get_param("~min_joint_velocity_eps", 1e-4)
 
         self.left_input_topic = rospy.get_param(
             "~left_input_topic", "/yumi/robl/cartesian_velocity_command"
@@ -171,6 +174,13 @@ class YumiDualArmCartesianVelocityController:
     def joint_state_cb(self, msg):
         for name, pos in zip(msg.name, msg.position):
             self.current_joint_map[name] = pos
+
+    def apply_min_joint_velocity(self, qdot, min_vel, eps):
+        qdot = np.asarray(qdot).copy()
+        for i in range(len(qdot)):
+            if abs(qdot[i]) > eps and abs(qdot[i]) < min_vel:
+                qdot[i] = np.sign(qdot[i]) * min_vel
+        return qdot
 
     def left_twist_cb(self, msg):
         self.latest_left_twist = np.array(
@@ -273,6 +283,13 @@ class YumiDualArmCartesianVelocityController:
 
         qdot_left = self.saturate(qdot_left, self.max_joint_velocity)
         qdot_right = self.saturate(qdot_right, self.max_joint_velocity)
+
+        qdot_left = self.apply_min_joint_velocity(
+            qdot_left, self.min_joint_velocity, self.min_joint_velocity_eps
+        )
+        qdot_right = self.apply_min_joint_velocity(
+            qdot_right, self.min_joint_velocity, self.min_joint_velocity_eps
+        )
 
         self.publish_joint_velocity_command(qdot_left, qdot_right)
 
