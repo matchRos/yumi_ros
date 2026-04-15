@@ -192,7 +192,7 @@ class ArmServo:
         self.max_angular_speed = rospy.get_param(f"~{name}_max_angular_speed", 0.90)
         self.min_duration = rospy.get_param(f"~{name}_min_duration", 1.0)
         self.slow_approach_linear_speed = rospy.get_param(
-            f"~{name}_slow_approach_linear_speed", 0.02
+            f"~{name}_slow_approach_linear_speed", 0.015
         )
 
         self.kp_pos = rospy.get_param(f"~{name}_kp_pos", 1.5)
