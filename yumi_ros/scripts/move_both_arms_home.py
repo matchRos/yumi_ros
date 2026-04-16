@@ -31,6 +31,10 @@ class YumiHomeBothArmsService:
             rospy.get_param("~acceleration_scaling", 0.2)
         )
 
+        self.scene = moveit_commander.PlanningSceneInterface()
+        rospy.sleep(1.0)  # Allow time for the planning scene to initialize
+        self.add_workspace_constraints()
+
         self.named_target = rospy.get_param("~named_target", "home_both")
 
         self.pub = rospy.Publisher(
@@ -87,6 +91,21 @@ class YumiHomeBothArmsService:
                 msg = f"Exception while planning home trajectory: {e}"
                 rospy.logerr(msg)
                 return TriggerResponse(success=False, message=msg)
+
+    def add_workspace_constraints(self):
+        from geometry_msgs.msg import PoseStamped
+
+        box_pose = PoseStamped()
+        box_pose.header.frame_id = "yumi_base_link"
+
+        box_pose.pose.orientation.w = 1.0
+        box_pose.pose.position.x = 0.75
+        box_pose.pose.position.y = 0.0
+        box_pose.pose.position.z = 0.25
+
+        self.scene.add_box("forbidden_zone", box_pose, size=(0.5, 0.6, 0.5))  # x, y, z
+
+        rospy.loginfo("Added forbidden workspace zone")
 
 
 if __name__ == "__main__":
