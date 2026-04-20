@@ -45,7 +45,7 @@
 
             <param name="publish_rate" value="250.0" />
             <param name="command_timeout" value="0.2" />
-            <param name="max_joint_velocity" value="0.5" />
+            <param name="max_joint_velocity" value="1.5" />
             <param name="damping" value="0.03" />
       </node>
 

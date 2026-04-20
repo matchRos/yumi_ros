@@ -69,12 +69,12 @@ class YumiDualArmCartesianVelocityController:
             "~robot_description_param", "/robot_description"
         )
         self.command_timeout = rospy.get_param("~command_timeout", 0.2)
-        self.publish_rate = rospy.get_param("~publish_rate", 100.0)
-        self.max_joint_velocity = rospy.get_param("~max_joint_velocity", 0.5)
+        self.publish_rate = rospy.get_param("~publish_rate", 250.0)
+        self.max_joint_velocity = rospy.get_param("~max_joint_velocity", 1.5)
         self.damping = rospy.get_param("~damping", 0.03)
         # the ABB controller will just ignore very small commands to avoid jitter around zero velocity
-        self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.01)
-        self.min_joint_velocity_eps = rospy.get_param("~min_joint_velocity_eps", 1e-4)
+        self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.001)
+        self.min_joint_velocity_eps = rospy.get_param("~min_joint_velocity_eps", 1e-5)
 
         self.left_input_topic = rospy.get_param(
             "~left_input_topic", "/yumi/robl/cartesian_velocity_command"
