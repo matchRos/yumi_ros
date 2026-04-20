@@ -33,8 +33,8 @@ class YumiJointVelocityGuard:
         ]
 
         # Conservative default limits only as fallback
-        self.v_max = rospy.get_param("~v_max", [0.40] * self.n_joints)
-        self.a_max = rospy.get_param("~a_max", [0.40] * self.n_joints)
+        self.v_max = rospy.get_param("~v_max", [1.40] * self.n_joints)
+        self.a_max = rospy.get_param("~a_max", [5.40] * self.n_joints)
         self.limit_margin = rospy.get_param("~limit_margin", [0.03] * self.n_joints)
 
         self.q_min = [-3.14] * self.n_joints
@@ -142,11 +142,27 @@ class YumiJointVelocityGuard:
 
         self.current_pos = reordered
 
-    def clamp_velocity(self, cmd):
-        out = [0.0] * self.n_joints
+    def clamp_velocity_preserve_direction(self, cmd):
+        cmd = [float(x) for x in cmd]
+
+        scales = []
         for i in range(self.n_joints):
-            out[i] = max(-self.v_max[i], min(self.v_max[i], cmd[i]))
-        return out
+            abs_cmd = abs(cmd[i])
+            v_lim = float(self.v_max[i])
+
+            if abs_cmd < 1e-12:
+                continue
+            if v_lim <= 0.0:
+                scales.append(0.0)
+                continue
+
+            scales.append(v_lim / abs_cmd)
+
+        if len(scales) == 0:
+            return cmd
+
+        scale = min(1.0, min(scales))
+        return [scale * x for x in cmd]
 
     def apply_acceleration_limit(self, target, dt):
         out = [0.0] * self.n_joints
@@ -209,7 +225,7 @@ class YumiJointVelocityGuard:
         else:
             raw_cmd = list(self.target_cmd)
 
-        limited_cmd = self.clamp_velocity(raw_cmd)
+        limited_cmd = self.clamp_velocity_preserve_direction(raw_cmd)
         limited_cmd = self.apply_joint_limit_protection(limited_cmd)
         limited_cmd = self.apply_acceleration_limit(limited_cmd, dt)
 

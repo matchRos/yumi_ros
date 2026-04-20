@@ -70,7 +70,7 @@ class YumiDualArmCartesianVelocityController:
         )
         self.command_timeout = rospy.get_param("~command_timeout", 0.2)
         self.publish_rate = rospy.get_param("~publish_rate", 100.0)
-        self.max_joint_velocity = rospy.get_param("~max_joint_velocity", 0.2)
+        self.max_joint_velocity = rospy.get_param("~max_joint_velocity", 0.5)
         self.damping = rospy.get_param("~damping", 0.03)
         # the ABB controller will just ignore very small commands to avoid jitter around zero velocity
         self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.01)
@@ -224,11 +224,13 @@ class YumiDualArmCartesianVelocityController:
             return np.zeros(6, dtype=float)
         return latest_twist.copy()
 
-    def saturate(self, qdot, limit):
+    def saturate_preserve_direction(self, qdot, limit):
         qdot = np.asarray(qdot).copy()
-        for i in range(len(qdot)):
-            qdot[i] = np.clip(qdot[i], -limit, limit)
-        return qdot
+        max_abs = np.max(np.abs(qdot))
+        if max_abs <= limit or max_abs < 1e-9:
+            return qdot
+        scale = limit / max_abs
+        return qdot * scale
 
     def publish_joint_velocity_command(self, qdot_left, qdot_right):
         msg = Float64MultiArray()
@@ -274,24 +276,28 @@ class YumiDualArmCartesianVelocityController:
             self.latest_right_twist, self.latest_right_twist_time
         )
 
-        qdot_left = self.left_arm.cartesian_to_joint_velocity(
+        qdot_left_raw = self.left_arm.cartesian_to_joint_velocity(
             q_left, desired_left_twist
         )
-        qdot_right = self.right_arm.cartesian_to_joint_velocity(
+        qdot_right_raw = self.right_arm.cartesian_to_joint_velocity(
             q_right, desired_right_twist
         )
 
-        qdot_left = self.saturate(qdot_left, self.max_joint_velocity)
-        qdot_right = self.saturate(qdot_right, self.max_joint_velocity)
-
-        qdot_left = self.apply_min_joint_velocity(
-            qdot_left, self.min_joint_velocity, self.min_joint_velocity_eps
+        qdot_left_sat = self.saturate_preserve_direction(
+            qdot_left_raw, self.max_joint_velocity
         )
-        qdot_right = self.apply_min_joint_velocity(
-            qdot_right, self.min_joint_velocity, self.min_joint_velocity_eps
+        qdot_right_sat = self.saturate_preserve_direction(
+            qdot_right_raw, self.max_joint_velocity
         )
 
-        self.publish_joint_velocity_command(qdot_left, qdot_right)
+        qdot_left_final = self.apply_min_joint_velocity(
+            qdot_left_sat, self.min_joint_velocity, self.min_joint_velocity_eps
+        )
+        qdot_right_final = self.apply_min_joint_velocity(
+            qdot_right_sat, self.min_joint_velocity, self.min_joint_velocity_eps
+        )
+
+        self.publish_joint_velocity_command(qdot_left_final, qdot_right_final)
 
 
 if __name__ == "__main__":
