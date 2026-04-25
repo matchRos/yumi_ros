@@ -7,10 +7,12 @@ import rospy
 import tf
 import PyKDL as kdl
 import moveit_commander
+import numpy as np
 
 from geometry_msgs.msg import PointStamped, PoseStamped, Pose
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
+from std_msgs.msg import Bool, String
 from kdl_parser_py.urdf import treeFromParam
 from urdf_parser_py.urdf import URDF
 
@@ -105,6 +107,34 @@ class YumiMoveItPoseTopics:
             latch=True,
         )
 
+        self.left_active_pub = rospy.Publisher(
+            "/yumi/robl/moveit_active", Bool, queue_size=1, latch=True
+        )
+        self.left_arrived_pub = rospy.Publisher(
+            "/yumi/robl/moveit_arrived", Bool, queue_size=1, latch=True
+        )
+        self.left_status_pub = rospy.Publisher(
+            "/yumi/robl/moveit_status", String, queue_size=1, latch=True
+        )
+        self.right_active_pub = rospy.Publisher(
+            "/yumi/robr/moveit_active", Bool, queue_size=1, latch=True
+        )
+        self.right_arrived_pub = rospy.Publisher(
+            "/yumi/robr/moveit_arrived", Bool, queue_size=1, latch=True
+        )
+        self.right_status_pub = rospy.Publisher(
+            "/yumi/robr/moveit_status", String, queue_size=1, latch=True
+        )
+
+        self.motion_joint_tolerance = rospy.get_param("~motion_joint_tolerance", 0.02)
+        self.motion_timeout_margin = rospy.get_param("~motion_timeout_margin", 8.0)
+        self.motion_timeout_scale = rospy.get_param("~motion_timeout_scale", 4.0)
+        self.feedback_rate_hz = rospy.get_param("~feedback_rate_hz", 10.0)
+        self.motion_watch = {
+            "left": None,
+            "right": None,
+        }
+
         self._build_kdl()
 
         self.left_arm = ArmModel(
@@ -183,6 +213,10 @@ class YumiMoveItPoseTopics:
             queue_size=1,
         )
 
+        rospy.Timer(rospy.Duration(1.0 / self.feedback_rate_hz), self.feedback_cb)
+        self.publish_motion_state("left", False, False, "idle")
+        self.publish_motion_state("right", False, False, "idle")
+
         rospy.loginfo("YuMi MoveIt pose topics node with scoring started")
 
     def _build_kdl(self):
@@ -196,6 +230,70 @@ class YumiMoveItPoseTopics:
     def joint_state_cb(self, msg):
         for name, pos in zip(msg.name, msg.position):
             self.current_joint_map[name] = pos
+
+    def publish_motion_state(self, arm_name, active, arrived, status):
+        if arm_name == "left":
+            self.left_active_pub.publish(Bool(data=active))
+            self.left_arrived_pub.publish(Bool(data=arrived))
+            self.left_status_pub.publish(String(data=status))
+        elif arm_name == "right":
+            self.right_active_pub.publish(Bool(data=active))
+            self.right_arrived_pub.publish(Bool(data=arrived))
+            self.right_status_pub.publish(String(data=status))
+
+    def _register_motion_watch(self, arm_model, plan, label):
+        jt = plan.joint_trajectory
+        joint_name_to_idx = {n: i for i, n in enumerate(jt.joint_names)}
+        try:
+            final_positions = np.array(
+                [jt.points[-1].positions[joint_name_to_idx[j]] for j in arm_model.joint_names],
+                dtype=float,
+            )
+        except KeyError:
+            self.publish_motion_state(arm_model.name, False, False, "execution_failed: joint_name_mismatch")
+            return
+
+        duration = 0.0
+        if jt.points:
+            duration = jt.points[-1].time_from_start.to_sec()
+
+        planned_window = max(duration * self.motion_timeout_scale, duration + self.motion_timeout_margin)
+        self.motion_watch[arm_model.name] = {
+            "target": final_positions,
+            "deadline": rospy.Time.now().to_sec() + planned_window,
+            "label": label,
+            "planned_duration": duration,
+        }
+        self.publish_motion_state(arm_model.name, True, False, "executing")
+
+    def feedback_cb(self, _event):
+        for arm_name, watch in list(self.motion_watch.items()):
+            if watch is None:
+                continue
+            arm_model = self.left_arm if arm_name == "left" else self.right_arm
+            q_current = self.get_current_joint_values_for_arm(arm_model)
+            if q_current is None:
+                continue
+
+            err = float(np.max(np.abs(q_current - watch["target"])))
+            now = rospy.Time.now().to_sec()
+
+            if err <= self.motion_joint_tolerance:
+                self.motion_watch[arm_name] = None
+                self.publish_motion_state(arm_name, False, True, "succeeded")
+                continue
+
+            if now > watch["deadline"]:
+                self.motion_watch[arm_name] = None
+                self.publish_motion_state(
+                    arm_name,
+                    False,
+                    False,
+                    f"timeout: joint_err={err:.4f} planned={watch.get('planned_duration', 0.0):.2f}s",
+                )
+                continue
+
+            self.publish_motion_state(arm_name, True, False, f"executing: joint_err={err:.4f}")
 
     def get_current_joint_values_for_arm(self, arm_model):
         vals = []
@@ -380,8 +478,9 @@ class YumiMoveItPoseTopics:
         rospy.loginfo(f"[{label}] selected best score = {best_score:.4f}")
         return best_plan
 
-    def publish_plan(self, plan, label):
+    def publish_plan(self, arm_model, plan, label):
         self.traj_pub.publish(plan.joint_trajectory)
+        self._register_motion_watch(arm_model, plan, label)
         rospy.loginfo(
             f"Published trajectory for {label} with "
             f"{len(plan.joint_trajectory.points)} points"
@@ -392,7 +491,7 @@ class YumiMoveItPoseTopics:
             pose = self.build_pose_with_current_orientation(msg, self.left_arm.tip_link)
             plan = self.plan_best(self.left_arm, pose, "left_arm current_orientation")
             if plan is not None:
-                self.publish_plan(plan, "left_arm current_orientation")
+                self.publish_plan(self.left_arm, plan, "left_arm current_orientation")
         except Exception as exc:
             rospy.logerr(f"Left current-orientation target failed: {exc}")
 
@@ -404,7 +503,7 @@ class YumiMoveItPoseTopics:
             )
             plan = self.plan_best(self.left_arm, pose, "left_arm facing_down")
             if plan is not None:
-                self.publish_plan(plan, "left_arm facing_down")
+                self.publish_plan(self.left_arm, plan, "left_arm facing_down")
         except Exception as exc:
             rospy.logerr(f"Left facing-down target failed: {exc}")
 
@@ -413,7 +512,7 @@ class YumiMoveItPoseTopics:
             pose = self.build_pose_from_pose_msg(msg)
             plan = self.plan_best(self.left_arm, pose, "left_arm full_pose")
             if plan is not None:
-                self.publish_plan(plan, "left_arm full_pose")
+                self.publish_plan(self.left_arm, plan, "left_arm full_pose")
         except Exception as exc:
             rospy.logerr(f"Left full-pose target failed: {exc}")
 
@@ -424,7 +523,7 @@ class YumiMoveItPoseTopics:
             )
             plan = self.plan_best(self.right_arm, pose, "right_arm current_orientation")
             if plan is not None:
-                self.publish_plan(plan, "right_arm current_orientation")
+                self.publish_plan(self.right_arm, plan, "right_arm current_orientation")
         except Exception as exc:
             rospy.logerr(f"Right current-orientation target failed: {exc}")
 
@@ -436,7 +535,7 @@ class YumiMoveItPoseTopics:
             )
             plan = self.plan_best(self.right_arm, pose, "right_arm facing_down")
             if plan is not None:
-                self.publish_plan(plan, "right_arm facing_down")
+                self.publish_plan(self.right_arm, plan, "right_arm facing_down")
         except Exception as exc:
             rospy.logerr(f"Right facing-down target failed: {exc}")
 
@@ -445,7 +544,7 @@ class YumiMoveItPoseTopics:
             pose = self.build_pose_from_pose_msg(msg)
             plan = self.plan_best(self.right_arm, pose, "right_arm full_pose")
             if plan is not None:
-                self.publish_plan(plan, "right_arm full_pose")
+                self.publish_plan(self.right_arm, plan, "right_arm full_pose")
         except Exception as exc:
             rospy.logerr(f"Right full-pose target failed: {exc}")
 
