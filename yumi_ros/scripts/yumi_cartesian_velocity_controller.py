@@ -356,19 +356,6 @@ class YumiDualArmCartesianVelocityController:
         cmd_cos = self.direction_cosine(desired_linear, commanded_linear)
         fb_cos = self.direction_cosine(desired_linear, feedback_linear)
 
-        rospy.loginfo_throttle(
-            self.diagnostics_period,
-            f"[{arm_name}] Cartesian velocity diagnostic "
-            f"desired_lin={self.format_vec(desired_linear)} "
-            f"cmd_lin={self.format_vec(commanded_linear)} "
-            f"fb_lin={self.format_vec(feedback_linear)} "
-            f"|desired|={np.linalg.norm(desired_linear):.4f} "
-            f"|cmd|={np.linalg.norm(commanded_linear):.4f} "
-            f"|fb|={np.linalg.norm(feedback_linear):.4f} "
-            f"cos_cmd={cmd_cos:.3f} cos_fb={fb_cos:.3f} "
-            f"qdot_cmd={self.format_vec(qdot_command)} "
-            f"qdot_fb={self.format_vec(qdot_feedback)}",
-        )
 
     def update(self, event):
         if event.last_real is None:

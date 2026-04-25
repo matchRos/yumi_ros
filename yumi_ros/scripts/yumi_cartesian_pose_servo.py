@@ -6,6 +6,7 @@ import copy
 import rospy
 import tf
 from geometry_msgs.msg import PoseStamped, TwistStamped, Pose
+from std_msgs.msg import Bool, String
 
 
 def clamp(value, lower, upper):
@@ -201,7 +202,18 @@ class ArmServo:
         self.pos_tolerance = rospy.get_param(f"~{name}_pos_tolerance", 0.002)
         self.rot_tolerance = rospy.get_param(f"~{name}_rot_tolerance", 0.03)
 
+        suffix = "l" if self.name == "left" else "r"
+        self.active_pub = rospy.Publisher(
+            f"/yumi/rob{suffix}/cartesian_active", Bool, queue_size=1, latch=True
+        )
+        self.arrived_pub = rospy.Publisher(
+            f"/yumi/rob{suffix}/cartesian_arrived", Bool, queue_size=1, latch=True
+        )
+        self.status_pub = rospy.Publisher(
+            f"/yumi/rob{suffix}/cartesian_status", String, queue_size=1, latch=True
+        )
         self.pub = rospy.Publisher(self.twist_topic, TwistStamped, queue_size=1)
+        self.publish_state(False, False, "idle")
 
         self.sub_normal = rospy.Subscriber(
             self.pose_topic, PoseStamped, self.target_cb_normal, queue_size=1
@@ -209,6 +221,11 @@ class ArmServo:
         self.sub_slow = rospy.Subscriber(
             self.slow_pose_topic, PoseStamped, self.target_cb_slow, queue_size=1
         )
+
+    def publish_state(self, active, arrived, status):
+        self.active_pub.publish(Bool(data=active))
+        self.arrived_pub.publish(Bool(data=arrived))
+        self.status_pub.publish(String(data=status))
 
     def get_current_pose_tf(self):
         self.tf_listener.waitForTransform(
@@ -274,11 +291,13 @@ class ArmServo:
                     max_linear_speed=linear_speed_limit,
                 )
 
+            self.publish_state(True, False, f"accepted: {mode_name}")
             rospy.loginfo(
                 f"[{self.name}] New {mode_name} Cartesian target accepted, "
                 f"duration={duration:.2f} s, max_linear_speed={linear_speed_limit:.3f} m/s"
             )
         except Exception as e:
+            self.publish_state(False, False, f"error: {e}")
             rospy.logerr(f"[{self.name}] Failed to accept target pose: {e}")
 
     def target_cb_normal(self, msg):
@@ -346,14 +365,19 @@ class ArmServo:
         msg.twist.angular.z = w_cmd[2]
         self.pub.publish(msg)
 
-        pos_done = vec_norm(vec_sub(p_des, p_cur)) < self.pos_tolerance
-        rot_done = vec_norm(quat_error_rotvec(q_cur, q_des)) < self.rot_tolerance
+        pos_err = vec_norm(vec_sub(p_des, p_cur))
+        rot_err = vec_norm(quat_error_rotvec(q_cur, q_des))
+        pos_done = pos_err < self.pos_tolerance
+        rot_done = rot_err < self.rot_tolerance
 
         if time_done and pos_done and rot_done:
             self.publish_zero()
             with self.lock:
                 self.active_profile = None
+            self.publish_state(False, True, "succeeded")
             rospy.loginfo(f"[{self.name}] Cartesian motion finished")
+        else:
+            self.publish_state(True, False, f"executing: pos_err={pos_err:.4f} rot_err={rot_err:.4f}")
 
 
 class YumiCartesianPoseServo:
