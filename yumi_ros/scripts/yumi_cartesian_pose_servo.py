@@ -252,8 +252,8 @@ class ArmServo:
         rotvec = quat_error_rotvec(q0, q1)
         dang = vec_norm(rotvec)
 
-        T_lin = dpos / max(linear_speed_limit * 0.5, 1e-3)
-        T_rot = dang / max(self.max_angular_speed * 0.5, 1e-3)
+        T_lin = dpos / max(linear_speed_limit, 1e-3)
+        T_rot = dang / max(self.max_angular_speed, 1e-3)
         return max(self.min_duration, T_lin, T_rot)
 
     def accept_target(self, msg, linear_speed_limit, mode_name):

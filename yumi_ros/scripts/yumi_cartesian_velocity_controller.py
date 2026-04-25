@@ -2,6 +2,7 @@
 import numpy as np
 import rospy
 import PyKDL as kdl
+import tf
 
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import JointState
@@ -20,30 +21,58 @@ class SingleArmKinematics:
         self.chain = tree.getChain(self.base_link, self.tip_link)
         self.num_joints = self.chain.getNrOfJoints()
         self.num_segments = self.chain.getNrOfSegments()
+        self.chain_joint_names = self.get_chain_joint_names()
+        self.command_to_chain_indices = None
+        self.chain_to_command_indices = None
 
         rospy.loginfo(
             f"[{self.arm_name}] base_link={self.base_link}, tip_link={self.tip_link}, "
             f"segments={self.num_segments}, joints={self.num_joints}"
         )
+        rospy.loginfo(f"[{self.arm_name}] KDL chain joints={self.chain_joint_names}")
 
         if self.num_joints != 7:
             rospy.logwarn(
                 f"[{self.arm_name}] Expected 7 joints in chain, got {self.num_joints}"
             )
+        if self.chain_joint_names != self.joint_names:
+            rospy.logwarn(
+                f"[{self.arm_name}] KDL joint order differs from command order: "
+                f"KDL={self.chain_joint_names}, command={self.joint_names}"
+            )
+        if set(self.chain_joint_names) == set(self.joint_names):
+            self.command_to_chain_indices = [
+                self.joint_names.index(name) for name in self.chain_joint_names
+            ]
+            self.chain_to_command_indices = [
+                self.chain_joint_names.index(name) for name in self.joint_names
+            ]
+        else:
+            rospy.logerr(
+                f"[{self.arm_name}] KDL and command joint sets differ; refusing IK"
+            )
 
         self.jac_solver = kdl.ChainJntToJacSolver(self.chain)
 
-    def compute_jacobian(self, q_np):
-        q_kdl = kdl.JntArray(len(q_np))
-        for i in range(len(q_np)):
-            q_kdl[i] = q_np[i]
+    def get_chain_joint_names(self):
+        names = []
+        for i in range(self.num_segments):
+            joint = self.chain.getSegment(i).getJoint()
+            if joint.getType() != kdl.Joint.Fixed:
+                names.append(joint.getName())
+        return names
 
-        jac_kdl = kdl.Jacobian(len(q_np))
+    def compute_jacobian(self, q_chain):
+        q_kdl = kdl.JntArray(len(q_chain))
+        for i in range(len(q_chain)):
+            q_kdl[i] = q_chain[i]
+
+        jac_kdl = kdl.Jacobian(len(q_chain))
         self.jac_solver.JntToJac(q_kdl, jac_kdl)
 
-        J = np.zeros((6, len(q_np)))
+        J = np.zeros((6, len(q_chain)))
         for r in range(6):
-            for c in range(len(q_np)):
+            for c in range(len(q_chain)):
                 J[r, c] = jac_kdl[r, c]
         return J
 
@@ -54,13 +83,15 @@ class SingleArmKinematics:
             return np.linalg.inv(J.T @ J + lam2 * np.eye(n)) @ J.T
         return J.T @ np.linalg.inv(J @ J.T + lam2 * np.eye(m))
 
-    def cartesian_to_joint_velocity(self, q_np, desired_twist):
-        if self.num_joints != 7:
+    def cartesian_to_joint_velocity(self, q_command, desired_twist):
+        if self.num_joints != 7 or self.command_to_chain_indices is None:
             return np.zeros(7, dtype=float)
 
-        J = self.compute_jacobian(q_np)
+        q_chain = q_command[self.command_to_chain_indices]
+        J = self.compute_jacobian(q_chain)
         J_pinv = self.damped_pseudoinverse(J)
-        return J_pinv @ desired_twist
+        qdot_chain = J_pinv @ desired_twist
+        return qdot_chain[self.chain_to_command_indices]
 
 
 class YumiDualArmCartesianVelocityController:
@@ -72,9 +103,8 @@ class YumiDualArmCartesianVelocityController:
         self.publish_rate = rospy.get_param("~publish_rate", 250.0)
         self.max_joint_velocity = rospy.get_param("~max_joint_velocity", 1.5)
         self.damping = rospy.get_param("~damping", 0.03)
-        # the ABB controller will just ignore very small commands to avoid jitter around zero velocity
-        self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.001)
-        self.min_joint_velocity_eps = rospy.get_param("~min_joint_velocity_eps", 1e-5)
+        self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.0)
+        self.min_joint_velocity_eps = rospy.get_param("~min_joint_velocity_eps", 1e-4)
 
         self.left_input_topic = rospy.get_param(
             "~left_input_topic", "/yumi/robl/cartesian_velocity_command"
@@ -141,6 +171,7 @@ class YumiDualArmCartesianVelocityController:
         self.latest_right_twist = np.zeros(6, dtype=float)
         self.latest_left_twist_time = rospy.Time(0)
         self.latest_right_twist_time = rospy.Time(0)
+        self.tf_listener = tf.TransformListener()
 
         rospy.Subscriber(
             "/yumi/egm/joint_states",
@@ -177,13 +208,16 @@ class YumiDualArmCartesianVelocityController:
 
     def apply_min_joint_velocity(self, qdot, min_vel, eps):
         qdot = np.asarray(qdot).copy()
-        for i in range(len(qdot)):
-            if abs(qdot[i]) > eps and abs(qdot[i]) < min_vel:
-                qdot[i] = np.sign(qdot[i]) * min_vel
+        if min_vel <= 0.0:
+            return qdot
+
+        max_abs = np.max(np.abs(qdot))
+        if eps < max_abs < min_vel:
+            qdot *= min_vel / max_abs
         return qdot
 
-    def left_twist_cb(self, msg):
-        self.latest_left_twist = np.array(
+    def twist_msg_to_np(self, msg, target_frame):
+        twist = np.array(
             [
                 msg.twist.linear.x,
                 msg.twist.linear.y,
@@ -194,19 +228,42 @@ class YumiDualArmCartesianVelocityController:
             ],
             dtype=float,
         )
+
+        source_frame = msg.header.frame_id.strip()
+        if source_frame in ["", target_frame]:
+            return twist
+
+        try:
+            self.tf_listener.waitForTransform(
+                target_frame,
+                source_frame,
+                rospy.Time(0),
+                rospy.Duration(0.05),
+            )
+            _, quat = self.tf_listener.lookupTransform(
+                target_frame, source_frame, rospy.Time(0)
+            )
+            rotation = tf.transformations.quaternion_matrix(quat)[:3, :3]
+            twist[:3] = rotation @ twist[:3]
+            twist[3:] = rotation @ twist[3:]
+        except Exception as exc:
+            rospy.logwarn_throttle(
+                1.0,
+                f"Could not transform twist from {source_frame} to {target_frame}: {exc}",
+            )
+            return np.zeros(6, dtype=float)
+
+        return twist
+
+    def left_twist_cb(self, msg):
+        self.latest_left_twist = self.twist_msg_to_np(
+            msg, self.left_arm.base_link
+        )
         self.latest_left_twist_time = rospy.Time.now()
 
     def right_twist_cb(self, msg):
-        self.latest_right_twist = np.array(
-            [
-                msg.twist.linear.x,
-                msg.twist.linear.y,
-                msg.twist.linear.z,
-                msg.twist.angular.x,
-                msg.twist.angular.y,
-                msg.twist.angular.z,
-            ],
-            dtype=float,
+        self.latest_right_twist = self.twist_msg_to_np(
+            msg, self.right_arm.base_link
         )
         self.latest_right_twist_time = rospy.Time.now()
 
