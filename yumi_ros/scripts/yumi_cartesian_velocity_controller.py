@@ -93,6 +93,15 @@ class SingleArmKinematics:
         qdot_chain = J_pinv @ desired_twist
         return qdot_chain[self.chain_to_command_indices]
 
+    def joint_velocity_to_cartesian(self, q_command, qdot_command):
+        if self.num_joints != 7 or self.command_to_chain_indices is None:
+            return np.zeros(6, dtype=float)
+
+        q_chain = q_command[self.command_to_chain_indices]
+        qdot_chain = qdot_command[self.command_to_chain_indices]
+        J = self.compute_jacobian(q_chain)
+        return J @ qdot_chain
+
 
 class YumiDualArmCartesianVelocityController:
     def __init__(self):
@@ -105,6 +114,8 @@ class YumiDualArmCartesianVelocityController:
         self.damping = rospy.get_param("~damping", 0.03)
         self.min_joint_velocity = rospy.get_param("~min_joint_velocity", 0.0)
         self.min_joint_velocity_eps = rospy.get_param("~min_joint_velocity_eps", 1e-4)
+        self.diagnostics_enabled = rospy.get_param("~diagnostics_enabled", True)
+        self.diagnostics_period = rospy.get_param("~diagnostics_period", 0.5)
 
         self.left_input_topic = rospy.get_param(
             "~left_input_topic", "/yumi/robl/cartesian_velocity_command"
@@ -166,6 +177,7 @@ class YumiDualArmCartesianVelocityController:
         )
 
         self.current_joint_map = {}
+        self.current_joint_velocity_map = {}
 
         self.latest_left_twist = np.zeros(6, dtype=float)
         self.latest_right_twist = np.zeros(6, dtype=float)
@@ -205,6 +217,8 @@ class YumiDualArmCartesianVelocityController:
     def joint_state_cb(self, msg):
         for name, pos in zip(msg.name, msg.position):
             self.current_joint_map[name] = pos
+        for name, vel in zip(msg.name, msg.velocity):
+            self.current_joint_velocity_map[name] = vel
 
     def apply_min_joint_velocity(self, qdot, min_vel, eps):
         qdot = np.asarray(qdot).copy()
@@ -275,6 +289,14 @@ class YumiDualArmCartesianVelocityController:
             q.append(self.current_joint_map[joint_name])
         return np.array(q, dtype=float)
 
+    def get_joint_velocities(self, joint_names):
+        qdot = []
+        for joint_name in joint_names:
+            if joint_name not in self.current_joint_velocity_map:
+                return None
+            qdot.append(self.current_joint_velocity_map[joint_name])
+        return np.array(qdot, dtype=float)
+
     def get_active_twist(self, latest_twist, latest_time):
         now = rospy.Time.now()
         if (now - latest_time).to_sec() > self.command_timeout:
@@ -296,6 +318,57 @@ class YumiDualArmCartesianVelocityController:
         full_cmd[7:] = qdot_right
         msg.data = full_cmd.tolist()
         self.pub.publish(msg)
+
+    def format_vec(self, vec):
+        return "[" + ", ".join(f"{v:+.4f}" for v in vec) + "]"
+
+    def direction_cosine(self, a, b):
+        a_norm = np.linalg.norm(a)
+        b_norm = np.linalg.norm(b)
+        if a_norm < 1e-9 or b_norm < 1e-9:
+            return float("nan")
+        return float(np.dot(a, b) / (a_norm * b_norm))
+
+    def log_arm_diagnostics(
+        self,
+        arm_name,
+        arm,
+        q,
+        qdot_feedback,
+        desired_twist,
+        qdot_command,
+        arm_active,
+    ):
+        if not self.diagnostics_enabled or not arm_active or qdot_feedback is None:
+            return
+
+        desired_norm = np.linalg.norm(desired_twist)
+        if desired_norm < 1e-9:
+            return
+
+        commanded_twist = arm.joint_velocity_to_cartesian(q, qdot_command)
+        feedback_twist = arm.joint_velocity_to_cartesian(q, qdot_feedback)
+
+        desired_linear = desired_twist[:3]
+        commanded_linear = commanded_twist[:3]
+        feedback_linear = feedback_twist[:3]
+
+        cmd_cos = self.direction_cosine(desired_linear, commanded_linear)
+        fb_cos = self.direction_cosine(desired_linear, feedback_linear)
+
+        rospy.loginfo_throttle(
+            self.diagnostics_period,
+            f"[{arm_name}] Cartesian velocity diagnostic "
+            f"desired_lin={self.format_vec(desired_linear)} "
+            f"cmd_lin={self.format_vec(commanded_linear)} "
+            f"fb_lin={self.format_vec(feedback_linear)} "
+            f"|desired|={np.linalg.norm(desired_linear):.4f} "
+            f"|cmd|={np.linalg.norm(commanded_linear):.4f} "
+            f"|fb|={np.linalg.norm(feedback_linear):.4f} "
+            f"cos_cmd={cmd_cos:.3f} cos_fb={fb_cos:.3f} "
+            f"qdot_cmd={self.format_vec(qdot_command)} "
+            f"qdot_fb={self.format_vec(qdot_feedback)}",
+        )
 
     def update(self, event):
         if event.last_real is None:
@@ -321,6 +394,8 @@ class YumiDualArmCartesianVelocityController:
 
         q_left = self.get_joint_positions(self.left_joint_names)
         q_right = self.get_joint_positions(self.right_joint_names)
+        qdot_left_feedback = self.get_joint_velocities(self.left_joint_names)
+        qdot_right_feedback = self.get_joint_velocities(self.right_joint_names)
 
         if q_left is None or q_right is None:
             rospy.logwarn_throttle(1.0, "Waiting for complete YuMi joint states")
@@ -352,6 +427,25 @@ class YumiDualArmCartesianVelocityController:
         )
         qdot_right_final = self.apply_min_joint_velocity(
             qdot_right_sat, self.min_joint_velocity, self.min_joint_velocity_eps
+        )
+
+        self.log_arm_diagnostics(
+            "left",
+            self.left_arm,
+            q_left,
+            qdot_left_feedback,
+            desired_left_twist,
+            qdot_left_final,
+            left_active,
+        )
+        self.log_arm_diagnostics(
+            "right",
+            self.right_arm,
+            q_right,
+            qdot_right_feedback,
+            desired_right_twist,
+            qdot_right_final,
+            right_active,
         )
 
         self.publish_joint_velocity_command(qdot_left_final, qdot_right_final)
