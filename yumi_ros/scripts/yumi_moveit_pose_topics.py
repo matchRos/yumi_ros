@@ -17,6 +17,12 @@ from kdl_parser_py.urdf import treeFromParam
 from urdf_parser_py.urdf import URDF
 
 
+def _param_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 class ArmModel:
     def __init__(
         self,
@@ -58,9 +64,13 @@ class YumiMoveItPoseTopics:
         self.planning_time = rospy.get_param("~planning_time", 3.0)
         self.num_planning_attempts = rospy.get_param("~num_planning_attempts", 5)
         self.num_candidate_plans = rospy.get_param("~num_candidate_plans", 6)
-        self.cartesian_waypoint_eef_step = rospy.get_param("~cartesian_waypoint_eef_step", 0.01)
-        self.cartesian_waypoint_avoid_collisions = rospy.get_param("~cartesian_waypoint_avoid_collisions", False)
-        self.cartesian_waypoint_min_fraction = rospy.get_param("~cartesian_waypoint_min_fraction", 0.85)
+        self.cartesian_waypoint_eef_step = float(rospy.get_param("~cartesian_waypoint_eef_step", 0.01))
+        self.cartesian_waypoint_avoid_collisions = _param_bool(
+            rospy.get_param("~cartesian_waypoint_avoid_collisions", False)
+        )
+        self.cartesian_waypoint_min_fraction = float(
+            rospy.get_param("~cartesian_waypoint_min_fraction", 0.85)
+        )
 
         self.score_weight_elbow_z = rospy.get_param("~score_weight_elbow_z", 3.0)
         self.score_weight_joint_margin = rospy.get_param(
@@ -518,10 +528,12 @@ class YumiMoveItPoseTopics:
 
         arm_model.group.clear_pose_targets()
         arm_model.group.set_start_state_to_current_state()
+        eef_step = float(self.cartesian_waypoint_eef_step)
+        avoid_collisions = bool(self.cartesian_waypoint_avoid_collisions)
         result = arm_model.group.compute_cartesian_path(
             waypoints,
-            self.cartesian_waypoint_eef_step,
-            self.cartesian_waypoint_avoid_collisions,
+            eef_step,
+            avoid_collisions,
         )
         if isinstance(result, tuple) and len(result) >= 2:
             plan, fraction = result[0], float(result[1])
@@ -551,6 +563,33 @@ class YumiMoveItPoseTopics:
             f"points={len(plan.joint_trajectory.points)}"
         )
         return plan
+
+    def log_received_waypoints(self, msg, label, max_count=8):
+        rospy.logwarn(
+            "[%s] received PoseArray frame='%s' waypoints=%d",
+            label,
+            msg.header.frame_id,
+            len(msg.poses),
+        )
+        for idx, pose in enumerate(msg.poses[:max_count]):
+            rospy.logwarn(
+                "[%s] input_wp[%02d] pos=[%.4f, %.4f, %.4f] quat_xyzw=[%.4f, %.4f, %.4f, %.4f]",
+                label,
+                idx,
+                pose.position.x,
+                pose.position.y,
+                pose.position.z,
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            )
+        if len(msg.poses) > max_count:
+            rospy.logwarn(
+                "[%s] ... %d additional input waypoint(s) omitted",
+                label,
+                len(msg.poses) - max_count,
+            )
 
     def left_position_current_orientation_cb(self, msg):
         try:
@@ -584,6 +623,7 @@ class YumiMoveItPoseTopics:
 
     def left_waypoints_cb(self, msg):
         try:
+            self.log_received_waypoints(msg, "left_arm waypoints")
             waypoints = self.build_waypoints_from_pose_array(msg)
             plan = self.plan_cartesian_waypoints(self.left_arm, waypoints, "left_arm waypoints")
             if plan is not None:
@@ -626,6 +666,7 @@ class YumiMoveItPoseTopics:
 
     def right_waypoints_cb(self, msg):
         try:
+            self.log_received_waypoints(msg, "right_arm waypoints")
             waypoints = self.build_waypoints_from_pose_array(msg)
             plan = self.plan_cartesian_waypoints(self.right_arm, waypoints, "right_arm waypoints")
             if plan is not None:

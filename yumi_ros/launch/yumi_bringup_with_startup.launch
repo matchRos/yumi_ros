@@ -97,6 +97,9 @@
             <param name="acceleration_scaling" value="1.0" />
             <param name="planning_time" value="3.0" />
             <param name="num_planning_attempts" value="5" />
+            <param name="cartesian_waypoint_eef_step" value="0.01" />
+            <param name="cartesian_waypoint_avoid_collisions" value="false" />
+            <param name="cartesian_waypoint_min_fraction" value="0.85" />
             <param name="startup_delay" value="16.0" />
 
             <!-- Placeholder quaternions -->
