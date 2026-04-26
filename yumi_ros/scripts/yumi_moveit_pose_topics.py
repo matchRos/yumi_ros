@@ -9,7 +9,7 @@ import PyKDL as kdl
 import moveit_commander
 import numpy as np
 
-from geometry_msgs.msg import PointStamped, PoseStamped, Pose
+from geometry_msgs.msg import PointStamped, PoseArray, PoseStamped, Pose
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
 from std_msgs.msg import Bool, String
@@ -58,6 +58,9 @@ class YumiMoveItPoseTopics:
         self.planning_time = rospy.get_param("~planning_time", 3.0)
         self.num_planning_attempts = rospy.get_param("~num_planning_attempts", 5)
         self.num_candidate_plans = rospy.get_param("~num_candidate_plans", 6)
+        self.cartesian_waypoint_eef_step = rospy.get_param("~cartesian_waypoint_eef_step", 0.01)
+        self.cartesian_waypoint_avoid_collisions = rospy.get_param("~cartesian_waypoint_avoid_collisions", False)
+        self.cartesian_waypoint_min_fraction = rospy.get_param("~cartesian_waypoint_min_fraction", 0.85)
 
         self.score_weight_elbow_z = rospy.get_param("~score_weight_elbow_z", 3.0)
         self.score_weight_joint_margin = rospy.get_param(
@@ -193,6 +196,12 @@ class YumiMoveItPoseTopics:
             self.left_pose_cb,
             queue_size=1,
         )
+        rospy.Subscriber(
+            "/yumi/robl/moveit_waypoints",
+            PoseArray,
+            self.left_waypoints_cb,
+            queue_size=1,
+        )
 
         rospy.Subscriber(
             "/yumi/robr/moveit_target_position_current_orientation",
@@ -210,6 +219,12 @@ class YumiMoveItPoseTopics:
             "/yumi/robr/moveit_target_pose",
             PoseStamped,
             self.right_pose_cb,
+            queue_size=1,
+        )
+        rospy.Subscriber(
+            "/yumi/robr/moveit_waypoints",
+            PoseArray,
+            self.right_waypoints_cb,
             queue_size=1,
         )
 
@@ -371,6 +386,16 @@ class YumiMoveItPoseTopics:
         pose_in_base = self.transform_pose_to_base(pose_msg)
         return pose_in_base.pose
 
+    def build_waypoints_from_pose_array(self, pose_array_msg):
+        waypoints = []
+        for pose in pose_array_msg.poses:
+            stamped = PoseStamped()
+            stamped.header = pose_array_msg.header
+            stamped.pose = pose
+            pose_in_base = self.transform_pose_to_base(stamped)
+            waypoints.append(pose_in_base.pose)
+        return waypoints
+
     def compute_fk_translation(self, base_link, tip_link, joint_values):
         chain = self.kdl_tree.getChain(base_link, tip_link)
         fk_solver = kdl.ChainFkSolverPos_recursive(chain)
@@ -486,6 +511,47 @@ class YumiMoveItPoseTopics:
             f"{len(plan.joint_trajectory.points)} points"
         )
 
+    def plan_cartesian_waypoints(self, arm_model, waypoints, label):
+        if len(waypoints) == 0:
+            rospy.logerr(f"No Cartesian waypoints for {label}")
+            return None
+
+        arm_model.group.clear_pose_targets()
+        arm_model.group.set_start_state_to_current_state()
+        result = arm_model.group.compute_cartesian_path(
+            waypoints,
+            self.cartesian_waypoint_eef_step,
+            self.cartesian_waypoint_avoid_collisions,
+        )
+        if isinstance(result, tuple) and len(result) >= 2:
+            plan, fraction = result[0], float(result[1])
+        else:
+            rospy.logerr(f"Unexpected compute_cartesian_path result for {label}")
+            return None
+
+        if fraction < self.cartesian_waypoint_min_fraction:
+            rospy.logerr(
+                f"Cartesian waypoint planning failed for {label}: "
+                f"fraction={fraction:.3f} < {self.cartesian_waypoint_min_fraction:.3f}"
+            )
+            self.publish_motion_state(
+                arm_model.name,
+                False,
+                False,
+                f"planning_failed: cartesian_fraction={fraction:.3f}",
+            )
+            return None
+        if not hasattr(plan, "joint_trajectory") or len(plan.joint_trajectory.points) == 0:
+            rospy.logerr(f"Cartesian waypoint planning produced empty plan for {label}")
+            self.publish_motion_state(arm_model.name, False, False, "planning_failed: empty_cartesian_plan")
+            return None
+
+        rospy.loginfo(
+            f"[{label}] Cartesian waypoint path fraction={fraction:.3f}, "
+            f"points={len(plan.joint_trajectory.points)}"
+        )
+        return plan
+
     def left_position_current_orientation_cb(self, msg):
         try:
             pose = self.build_pose_with_current_orientation(msg, self.left_arm.tip_link)
@@ -515,6 +581,16 @@ class YumiMoveItPoseTopics:
                 self.publish_plan(self.left_arm, plan, "left_arm full_pose")
         except Exception as exc:
             rospy.logerr(f"Left full-pose target failed: {exc}")
+
+    def left_waypoints_cb(self, msg):
+        try:
+            waypoints = self.build_waypoints_from_pose_array(msg)
+            plan = self.plan_cartesian_waypoints(self.left_arm, waypoints, "left_arm waypoints")
+            if plan is not None:
+                self.publish_plan(self.left_arm, plan, "left_arm waypoints")
+        except Exception as exc:
+            rospy.logerr(f"Left waypoint target failed: {exc}")
+            self.publish_motion_state("left", False, False, f"error: {exc}")
 
     def right_position_current_orientation_cb(self, msg):
         try:
@@ -547,6 +623,16 @@ class YumiMoveItPoseTopics:
                 self.publish_plan(self.right_arm, plan, "right_arm full_pose")
         except Exception as exc:
             rospy.logerr(f"Right full-pose target failed: {exc}")
+
+    def right_waypoints_cb(self, msg):
+        try:
+            waypoints = self.build_waypoints_from_pose_array(msg)
+            plan = self.plan_cartesian_waypoints(self.right_arm, waypoints, "right_arm waypoints")
+            if plan is not None:
+                self.publish_plan(self.right_arm, plan, "right_arm waypoints")
+        except Exception as exc:
+            rospy.logerr(f"Right waypoint target failed: {exc}")
+            self.publish_motion_state("right", False, False, f"error: {exc}")
 
 
 if __name__ == "__main__":
