@@ -61,6 +61,40 @@ class YumiMoveItPoseTopics:
 
         self.velocity_scaling = rospy.get_param("~velocity_scaling", 0.2)
         self.acceleration_scaling = rospy.get_param("~acceleration_scaling", 0.2)
+        self.retime_trajectories = _param_bool(
+            rospy.get_param("~retime_trajectories", True)
+        )
+        self.trajectory_time_scale = max(
+            1.0, float(rospy.get_param("~trajectory_time_scale", 1.0))
+        )
+        self.fallback_joint_speed = max(
+            1e-3, float(rospy.get_param("~fallback_joint_speed", 0.05))
+        )
+        self.min_segment_duration = max(
+            0.0, float(rospy.get_param("~min_segment_duration", 0.05))
+        )
+        self.waypoint_velocity_scaling = rospy.get_param(
+            "~waypoint_velocity_scaling", self.velocity_scaling
+        )
+        self.waypoint_acceleration_scaling = rospy.get_param(
+            "~waypoint_acceleration_scaling", self.acceleration_scaling
+        )
+        self.waypoint_trajectory_time_scale = max(
+            1.0,
+            float(rospy.get_param("~waypoint_trajectory_time_scale", self.trajectory_time_scale)),
+        )
+        self.waypoint_fallback_joint_speed = max(
+            1e-3,
+            float(rospy.get_param("~waypoint_fallback_joint_speed", self.fallback_joint_speed)),
+        )
+        self.waypoint_min_segment_duration = max(
+            0.0,
+            float(rospy.get_param("~waypoint_min_segment_duration", self.min_segment_duration)),
+        )
+        self.log_plan_details_enabled = _param_bool(
+            rospy.get_param("~log_plan_details", True)
+        )
+        self.plan_debug_sample_count = int(rospy.get_param("~plan_debug_sample_count", 8))
         self.planning_time = rospy.get_param("~planning_time", 3.0)
         self.num_planning_attempts = rospy.get_param("~num_planning_attempts", 5)
         self.num_candidate_plans = rospy.get_param("~num_candidate_plans", 6)
@@ -70,6 +104,18 @@ class YumiMoveItPoseTopics:
         )
         self.cartesian_waypoint_min_fraction = float(
             rospy.get_param("~cartesian_waypoint_min_fraction", 0.85)
+        )
+        self.cartesian_waypoint_allow_partial_execution = _param_bool(
+            rospy.get_param("~cartesian_waypoint_allow_partial_execution", False)
+        )
+        self.cartesian_waypoint_min_partial_fraction = float(
+            rospy.get_param("~cartesian_waypoint_min_partial_fraction", 0.05)
+        )
+        self.cartesian_waypoint_debug_on_failure = _param_bool(
+            rospy.get_param("~cartesian_waypoint_debug_on_failure", True)
+        )
+        self.cartesian_waypoint_debug_window = int(
+            rospy.get_param("~cartesian_waypoint_debug_window", 4)
         )
 
         self.score_weight_elbow_z = rospy.get_param("~score_weight_elbow_z", 3.0)
@@ -96,6 +142,7 @@ class YumiMoveItPoseTopics:
         self.tf_listener = tf.TransformListener()
         rospy.sleep(1.0)
 
+        self.robot = moveit_commander.RobotCommander()
         self.left_group = moveit_commander.MoveGroupCommander("left_arm")
         self.right_group = moveit_commander.MoveGroupCommander("right_arm")
 
@@ -513,12 +560,202 @@ class YumiMoveItPoseTopics:
         rospy.loginfo(f"[{label}] selected best score = {best_score:.4f}")
         return best_plan
 
+    def _trajectory_duration(self, plan):
+        points = plan.joint_trajectory.points
+        if not points:
+            return 0.0
+        return float(points[-1].time_from_start.to_sec())
+
+    def _is_waypoint_plan(self, label):
+        return "waypoints" in str(label).lower()
+
+    def _execution_profile(self, label):
+        if self._is_waypoint_plan(label):
+            return {
+                "velocity_scaling": float(self.waypoint_velocity_scaling),
+                "acceleration_scaling": float(self.waypoint_acceleration_scaling),
+                "trajectory_time_scale": float(self.waypoint_trajectory_time_scale),
+                "fallback_joint_speed": float(self.waypoint_fallback_joint_speed),
+                "min_segment_duration": float(self.waypoint_min_segment_duration),
+                "name": "waypoint",
+            }
+        return {
+            "velocity_scaling": float(self.velocity_scaling),
+            "acceleration_scaling": float(self.acceleration_scaling),
+            "trajectory_time_scale": float(self.trajectory_time_scale),
+            "fallback_joint_speed": float(self.fallback_joint_speed),
+            "min_segment_duration": float(self.min_segment_duration),
+            "name": "normal",
+        }
+
+    def _retime_plan(self, arm_model, plan, label):
+        if not self.retime_trajectories:
+            return plan
+        profile = self._execution_profile(label)
+        try:
+            current_state = self.robot.get_current_state()
+            try:
+                retimed = arm_model.group.retime_trajectory(
+                    current_state,
+                    plan,
+                    profile["velocity_scaling"],
+                    profile["acceleration_scaling"],
+                )
+            except TypeError:
+                retimed = arm_model.group.retime_trajectory(
+                    current_state,
+                    plan,
+                    profile["velocity_scaling"],
+                )
+            if (
+                retimed is not None
+                and hasattr(retimed, "joint_trajectory")
+                and len(retimed.joint_trajectory.points) > 0
+            ):
+                rospy.loginfo(
+                    f"[{label}] retimed trajectory duration "
+                    f"{self._trajectory_duration(plan):.3f}s -> "
+                    f"{self._trajectory_duration(retimed):.3f}s "
+                    f"(profile={profile['name']}, "
+                    f"vel_scale={profile['velocity_scaling']:.3f}, "
+                    f"acc_scale={profile['acceleration_scaling']:.3f})"
+                )
+                return retimed
+        except Exception as exc:
+            rospy.logwarn(f"[{label}] trajectory retiming failed; using original timing: {exc}")
+        return plan
+
+    def _ensure_trajectory_timing(self, plan, label):
+        out = copy.deepcopy(plan)
+        points = out.joint_trajectory.points
+        if not points:
+            return out
+
+        raw_times = [max(0.0, float(pt.time_from_start.to_sec())) for pt in points]
+        first_time = raw_times[0]
+        raw_times = [max(0.0, t - first_time) for t in raw_times]
+
+        fixed = abs(first_time) > 1e-9
+        profile = self._execution_profile(label)
+        new_times = []
+        prev_time = 0.0
+        prev_pos = None
+        for idx, pt in enumerate(points):
+            current_pos = np.asarray(pt.positions, dtype=float) if len(pt.positions) > 0 else None
+            if idx == 0:
+                new_time = 0.0
+            else:
+                existing_dt = raw_times[idx] - raw_times[idx - 1]
+                if existing_dt <= 1e-6:
+                    if current_pos is not None and prev_pos is not None and len(current_pos) == len(prev_pos):
+                        max_delta = float(np.max(np.abs(current_pos - prev_pos)))
+                        fallback_dt = max_delta / profile["fallback_joint_speed"]
+                    else:
+                        fallback_dt = 0.0
+                    new_time = prev_time + max(float(profile["min_segment_duration"]), fallback_dt)
+                    fixed = True
+                else:
+                    new_time = raw_times[idx]
+                    if profile["min_segment_duration"] > 0.0:
+                        min_time = prev_time + float(profile["min_segment_duration"])
+                        if new_time < min_time:
+                            new_time = min_time
+                            fixed = True
+            pt.time_from_start = rospy.Duration.from_sec(new_time)
+            new_times.append(new_time)
+            prev_time = new_time
+            prev_pos = current_pos
+
+        if fixed:
+            for pt in points:
+                pt.velocities = []
+                pt.accelerations = []
+            rospy.logwarn(
+                f"[{label}] adjusted trajectory timestamps; duration now {new_times[-1]:.3f}s; "
+                "cleared feed-forward velocities"
+            )
+        return out
+
+    def _scale_trajectory_time(self, plan, scale, label):
+        scale = max(1.0, float(scale))
+        if scale <= 1.0:
+            return plan
+        out = copy.deepcopy(plan)
+        for pt in out.joint_trajectory.points:
+            pt.time_from_start = rospy.Duration.from_sec(
+                float(pt.time_from_start.to_sec()) * scale
+            )
+            if len(pt.velocities) > 0:
+                pt.velocities = [float(v) / scale for v in pt.velocities]
+            if len(pt.accelerations) > 0:
+                pt.accelerations = [float(a) / (scale * scale) for a in pt.accelerations]
+        rospy.logwarn(
+            f"[{label}] scaled trajectory time by {scale:.2f}; "
+            f"duration={self._trajectory_duration(out):.3f}s"
+        )
+        return out
+
+    def _prepare_plan_for_execution(self, arm_model, plan, label):
+        prepared = self._retime_plan(arm_model, plan, label)
+        prepared = self._ensure_trajectory_timing(prepared, label)
+        profile = self._execution_profile(label)
+        prepared = self._scale_trajectory_time(
+            prepared,
+            profile["trajectory_time_scale"],
+            label,
+        )
+        return prepared
+
+    def log_plan_details(self, arm_model, plan, label):
+        if not self.log_plan_details_enabled:
+            return
+        jt = plan.joint_trajectory
+        points = jt.points
+        if not points:
+            return
+        times = [float(pt.time_from_start.to_sec()) for pt in points]
+        dts = np.diff(times) if len(times) > 1 else np.array([], dtype=float)
+        profile = self._execution_profile(label)
+        rospy.logwarn(
+            "[%s] trajectory ready: points=%d duration=%.3fs min_dt=%.4fs max_dt=%.4fs "
+            "profile=%s retime=%s time_scale=%.2f vel_scale=%.3f acc_scale=%.3f",
+            label,
+            len(points),
+            times[-1],
+            float(np.min(dts)) if dts.size else 0.0,
+            float(np.max(dts)) if dts.size else 0.0,
+            profile["name"],
+            bool(self.retime_trajectories),
+            float(profile["trajectory_time_scale"]),
+            float(profile["velocity_scaling"]),
+            float(profile["acceleration_scaling"]),
+        )
+        sample_count = max(1, min(int(self.plan_debug_sample_count), len(points)))
+        sample_indices = sorted(set(np.linspace(0, len(points) - 1, sample_count, dtype=int).tolist()))
+        name_to_idx = {name: idx for idx, name in enumerate(jt.joint_names)}
+        for idx in sample_indices:
+            pt = points[idx]
+            q = []
+            for joint_name in arm_model.joint_names:
+                if joint_name in name_to_idx and len(pt.positions) > name_to_idx[joint_name]:
+                    q.append(float(pt.positions[name_to_idx[joint_name]]))
+            rospy.logwarn(
+                "[%s] traj_pt[%03d] t=%.3fs q=%s",
+                label,
+                idx,
+                float(pt.time_from_start.to_sec()),
+                np.round(q, 4).tolist(),
+            )
+
     def publish_plan(self, arm_model, plan, label):
-        self.traj_pub.publish(plan.joint_trajectory)
-        self._register_motion_watch(arm_model, plan, label)
+        prepared = self._prepare_plan_for_execution(arm_model, plan, label)
+        self.log_plan_details(arm_model, prepared, label)
+        self.traj_pub.publish(prepared.joint_trajectory)
+        self._register_motion_watch(arm_model, prepared, label)
         rospy.loginfo(
             f"Published trajectory for {label} with "
-            f"{len(plan.joint_trajectory.points)} points"
+            f"{len(prepared.joint_trajectory.points)} points, "
+            f"duration={self._trajectory_duration(prepared):.3f}s"
         )
 
     def plan_cartesian_waypoints(self, arm_model, waypoints, label):
@@ -546,6 +783,19 @@ class YumiMoveItPoseTopics:
                 f"Cartesian waypoint planning failed for {label}: "
                 f"fraction={fraction:.3f} < {self.cartesian_waypoint_min_fraction:.3f}"
             )
+            if self.cartesian_waypoint_debug_on_failure:
+                self.log_cartesian_waypoint_failure(arm_model, plan, waypoints, fraction, label)
+            if (
+                self.cartesian_waypoint_allow_partial_execution
+                and fraction >= self.cartesian_waypoint_min_partial_fraction
+                and hasattr(plan, "joint_trajectory")
+                and len(plan.joint_trajectory.points) > 0
+            ):
+                rospy.logwarn(
+                    f"[{label}] executing partial Cartesian path for debugging: "
+                    f"fraction={fraction:.3f}, points={len(plan.joint_trajectory.points)}"
+                )
+                return plan
             self.publish_motion_state(
                 arm_model.name,
                 False,
@@ -563,6 +813,122 @@ class YumiMoveItPoseTopics:
             f"points={len(plan.joint_trajectory.points)}"
         )
         return plan
+
+    def pose_position_np(self, pose):
+        return np.array(
+            [pose.position.x, pose.position.y, pose.position.z],
+            dtype=float,
+        )
+
+    def pose_quat_np(self, pose):
+        return np.array(
+            [
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            ],
+            dtype=float,
+        )
+
+    def quat_angle_deg(self, quat_a, quat_b):
+        qa = np.asarray(quat_a, dtype=float).reshape(4)
+        qb = np.asarray(quat_b, dtype=float).reshape(4)
+        qa_norm = float(np.linalg.norm(qa))
+        qb_norm = float(np.linalg.norm(qb))
+        if qa_norm < 1e-12 or qb_norm < 1e-12:
+            return float("nan")
+        qa = qa / qa_norm
+        qb = qb / qb_norm
+        dot = abs(float(np.dot(qa, qb)))
+        dot = max(-1.0, min(1.0, dot))
+        return float(np.degrees(2.0 * math.acos(dot)))
+
+    def log_joint_margin_details(self, arm_model, q, label, prefix):
+        q = np.asarray(q, dtype=float).reshape(-1)
+        lower_margin = q - arm_model.joint_min
+        upper_margin = arm_model.joint_max - q
+        signed_margin = np.minimum(lower_margin, upper_margin)
+        rospy.logwarn(
+            "[%s] %s q=%s",
+            label,
+            prefix,
+            np.round(q, 4).tolist(),
+        )
+        for idx, joint_name in enumerate(arm_model.joint_names):
+            rospy.logwarn(
+                "[%s] %s %s q=%.4f range=[%.4f, %.4f] margin=%.4f",
+                label,
+                prefix,
+                joint_name,
+                float(q[idx]),
+                float(arm_model.joint_min[idx]),
+                float(arm_model.joint_max[idx]),
+                float(signed_margin[idx]),
+            )
+
+    def log_cartesian_waypoint_failure(self, arm_model, plan, waypoints, fraction, label):
+        requested = len(waypoints)
+        reached_est = int(math.floor(float(fraction) * float(requested)))
+        reached_est = max(0, min(requested - 1, reached_est))
+        next_est = min(requested - 1, reached_est + 1)
+        window = max(1, int(self.cartesian_waypoint_debug_window))
+        start = max(0, reached_est - window)
+        end = min(requested, next_est + window + 1)
+
+        rospy.logwarn(
+            "[%s] Cartesian failure diagnostic: fraction=%.3f requested_waypoints=%d "
+            "reached_est=%d next_est=%d eef_step=%.4f avoid_collisions=%s",
+            label,
+            float(fraction),
+            requested,
+            reached_est,
+            next_est,
+            float(self.cartesian_waypoint_eef_step),
+            bool(self.cartesian_waypoint_avoid_collisions),
+        )
+
+        q_current = self.get_current_joint_values_for_arm(arm_model)
+        if q_current is not None:
+            self.log_joint_margin_details(arm_model, q_current, label, "current")
+
+        if hasattr(plan, "joint_trajectory") and len(plan.joint_trajectory.points) > 0:
+            jt = plan.joint_trajectory
+            name_to_idx = {name: idx for idx, name in enumerate(jt.joint_names)}
+            try:
+                q_last = np.array(
+                    [jt.points[-1].positions[name_to_idx[j]] for j in arm_model.joint_names],
+                    dtype=float,
+                )
+                self.log_joint_margin_details(arm_model, q_last, label, "last_cartesian")
+            except KeyError:
+                rospy.logwarn("[%s] Cannot map last Cartesian point to expected joint order", label)
+
+        prev_pos = None
+        prev_quat = None
+        for idx in range(start, end):
+            pose = waypoints[idx]
+            pos = self.pose_position_np(pose)
+            quat = self.pose_quat_np(pose)
+            if prev_pos is None and idx > 0:
+                prev_pose = waypoints[idx - 1]
+                prev_pos = self.pose_position_np(prev_pose)
+                prev_quat = self.pose_quat_np(prev_pose)
+            seg_len = 0.0 if prev_pos is None else float(np.linalg.norm(pos - prev_pos))
+            rot_delta = 0.0 if prev_quat is None else self.quat_angle_deg(prev_quat, quat)
+            marker = "last_reached_est" if idx == reached_est else ("next_after_failure" if idx == next_est else "nearby")
+            rospy.logwarn(
+                "[%s] fail_wp[%03d] %s pos=%s seg_len=%.4f rot_delta_deg=%.2f quat_xyzw=%s",
+                label,
+                idx,
+                marker,
+                np.round(pos, 4).tolist(),
+                seg_len,
+                rot_delta,
+                np.round(quat, 4).tolist(),
+            )
+            prev_pos = pos
+            prev_quat = quat
 
     def log_received_waypoints(self, msg, label, max_count=8):
         rospy.logwarn(
@@ -589,6 +955,44 @@ class YumiMoveItPoseTopics:
                 "[%s] ... %d additional input waypoint(s) omitted",
                 label,
                 len(msg.poses) - max_count,
+            )
+
+    def log_base_waypoints(self, waypoints, label, max_count=8):
+        rospy.logwarn("[%s] transformed base-frame waypoints=%d", label, len(waypoints))
+        prev = None
+        for idx, pose in enumerate(waypoints[:max_count]):
+            pos = np.array(
+                [
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z,
+                ],
+                dtype=float,
+            )
+            if prev is None:
+                seg_len = 0.0
+                seg = np.zeros(3, dtype=float)
+            else:
+                seg = pos - prev
+                seg_len = float(np.linalg.norm(seg))
+            rospy.logwarn(
+                "[%s] base_wp[%02d] pos=%s seg_len=%.4f seg=%s quat_xyzw=[%.4f, %.4f, %.4f, %.4f]",
+                label,
+                idx,
+                np.round(pos, 4).tolist(),
+                seg_len,
+                np.round(seg, 4).tolist(),
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            )
+            prev = pos
+        if len(waypoints) > max_count:
+            rospy.logwarn(
+                "[%s] ... %d additional transformed waypoint(s) omitted",
+                label,
+                len(waypoints) - max_count,
             )
 
     def left_position_current_orientation_cb(self, msg):
@@ -625,6 +1029,7 @@ class YumiMoveItPoseTopics:
         try:
             self.log_received_waypoints(msg, "left_arm waypoints")
             waypoints = self.build_waypoints_from_pose_array(msg)
+            self.log_base_waypoints(waypoints, "left_arm waypoints")
             plan = self.plan_cartesian_waypoints(self.left_arm, waypoints, "left_arm waypoints")
             if plan is not None:
                 self.publish_plan(self.left_arm, plan, "left_arm waypoints")
@@ -668,6 +1073,7 @@ class YumiMoveItPoseTopics:
         try:
             self.log_received_waypoints(msg, "right_arm waypoints")
             waypoints = self.build_waypoints_from_pose_array(msg)
+            self.log_base_waypoints(waypoints, "right_arm waypoints")
             plan = self.plan_cartesian_waypoints(self.right_arm, waypoints, "right_arm waypoints")
             if plan is not None:
                 self.publish_plan(self.right_arm, plan, "right_arm waypoints")

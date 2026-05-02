@@ -11,6 +11,7 @@ class YumiJointVelocityGuard:
         self.n_joints = 14
         self.rate_hz = rospy.get_param("~rate", 100.0)
         self.cmd_timeout = rospy.get_param("~cmd_timeout", 0.2)
+        self.command_deadband = rospy.get_param("~command_deadband", 1e-4)
         self.robot_description_param = rospy.get_param(
             "~robot_description_param", "/robot_description"
         )
@@ -173,6 +174,12 @@ class YumiJointVelocityGuard:
             out[i] = self.filtered_cmd[i] + dv
         return out
 
+    def apply_deadband(self, cmd):
+        deadband = float(self.command_deadband)
+        if deadband <= 0.0:
+            return cmd
+        return [0.0 if abs(float(value)) < deadband else float(value) for value in cmd]
+
     def apply_joint_limit_protection(self, cmd):
         if self.current_pos is None:
             return [0.0] * self.n_joints
@@ -228,6 +235,7 @@ class YumiJointVelocityGuard:
         limited_cmd = self.clamp_velocity_preserve_direction(raw_cmd)
         limited_cmd = self.apply_joint_limit_protection(limited_cmd)
         limited_cmd = self.apply_acceleration_limit(limited_cmd, dt)
+        limited_cmd = self.apply_deadband(limited_cmd)
 
         self.filtered_cmd = limited_cmd
 

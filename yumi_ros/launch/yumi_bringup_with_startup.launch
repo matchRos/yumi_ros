@@ -18,7 +18,9 @@
       <node pkg="yumi_ros"
             type="yumi_velocity_guard.py"
             name="yumi_velocity_guard"
-            output="screen" />
+            output="screen">
+            <param name="command_deadband" value="0.0001" />
+      </node>
 
       <node pkg="yumi_ros"
             type="yumi_session_watchdog.py"
@@ -95,11 +97,26 @@
 
             <param name="velocity_scaling" value="1.0" />
             <param name="acceleration_scaling" value="1.0" />
+            <param name="retime_trajectories" value="true" />
+            <param name="trajectory_time_scale" value="1.0" />
+            <param name="fallback_joint_speed" value="0.05" />
+            <param name="min_segment_duration" value="0.05" />
+            <param name="waypoint_velocity_scaling" value="0.30" />
+            <param name="waypoint_acceleration_scaling" value="0.30" />
+            <param name="waypoint_trajectory_time_scale" value="2.0" />
+            <param name="waypoint_fallback_joint_speed" value="0.05" />
+            <param name="waypoint_min_segment_duration" value="0.10" />
+            <param name="log_plan_details" value="true" />
+            <param name="plan_debug_sample_count" value="8" />
             <param name="planning_time" value="3.0" />
             <param name="num_planning_attempts" value="5" />
-            <param name="cartesian_waypoint_eef_step" value="0.01" />
+            <param name="cartesian_waypoint_eef_step" value="0.005" />
             <param name="cartesian_waypoint_avoid_collisions" value="false" />
             <param name="cartesian_waypoint_min_fraction" value="0.85" />
+            <param name="cartesian_waypoint_allow_partial_execution" value="true" />
+            <param name="cartesian_waypoint_min_partial_fraction" value="0.05" />
+            <param name="cartesian_waypoint_debug_on_failure" value="true" />
+            <param name="cartesian_waypoint_debug_window" value="4" />
             <param name="startup_delay" value="16.0" />
 
             <!-- Placeholder quaternions -->
@@ -122,6 +139,9 @@
             output="screen">
             <remap from="/input_joint_states" to="/yumi/egm/joint_states" />
             <remap from="/output_joint_states" to="/joint_states" />
+            <param name="use_input_stamp" value="false" />
+            <param name="force_monotonic_stamps" value="true" />
+            <param name="publish_on_gripper_update" value="false" />
       </node>
 
       <!-- robot description -->
